@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from string import Formatter
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,19 @@ def parse_time(value: str | datetime) -> datetime:
     if dt.tzinfo is None:
         raise ValueError("Timestamp must include a timezone")
     return dt.astimezone(timezone.utc)
+
+
+def render_path(template: str, *, track: str, channel: int | None, stream: str) -> str:
+    if not template.startswith("/") or "://" in template or any(c in template for c in "?#\\\r\n"):
+        raise ValueError("RTSP path template must be an absolute path without a URL, query, or fragment")
+    values = {"track": track, "channel": str(channel or ""), "stream": stream}
+    for _, field, format_spec, conversion in Formatter().parse(template):
+        if field and (field not in values or format_spec or conversion):
+            raise ValueError("RTSP path template supports only {track}, {channel}, and {stream}")
+    path = template.format_map(values)
+    if any(segment == ".." for segment in path.split("/")) or not path.startswith("/"):
+        raise ValueError("RTSP path template contains an unsafe path")
+    return path
 
 
 def hik_time(dt: datetime, mode: TimestampMode, nvr_timezone: str, offset_minutes: int = 0) -> str:
@@ -48,7 +62,9 @@ class PlaybackRequest:
 def playback_url(*, host: str, port: int, username: str, password: str, track: str,
                  start: str | datetime, end: str | datetime, mode: TimestampMode,
                  nvr_timezone: str, offset_minutes: int = 0, pre_roll: int = 0,
-                 post_roll: int = 0, max_seconds: int = 180) -> PlaybackRequest:
+                 post_roll: int = 0, max_seconds: int = 180,
+                 path_template: str = "/Streaming/tracks/{track}", channel: int | None = None,
+                 stream: str = "main") -> PlaybackRequest:
     start_utc = parse_time(start) - timedelta(seconds=pre_roll)
     requested_end = parse_time(end) + timedelta(seconds=post_roll)
     end_utc = min(requested_end, start_utc + timedelta(seconds=max_seconds))
@@ -58,10 +74,9 @@ def playback_url(*, host: str, port: int, username: str, password: str, track: s
         raise ValueError("Invalid NVR host or port")
     ps = hik_time(start_utc, mode, nvr_timezone, offset_minutes)
     pe = hik_time(end_utc, mode, nvr_timezone, offset_minutes)
-    path = f"/Streaming/tracks/{track}?starttime={ps}&endtime={pe}"
+    path = f"{render_path(path_template, track=track, channel=channel, stream=stream)}?starttime={ps}&endtime={pe}"
     credentials = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username or password else ""
     return PlaybackRequest(
         f"rtsp://{credentials}{host}:{port}{path}",
         f"rtsp://***:***@{host}:{port}{path}", start_utc, end_utc, ps, pe,
     )
-

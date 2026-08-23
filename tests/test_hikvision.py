@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from app.hikvision import TimestampMode, default_tracks, hik_time, playback_url
+from app.hikvision import TimestampMode, default_tracks, hik_time, playback_url, render_path
 
 
 def test_all_default_tracks():
@@ -46,3 +46,17 @@ def test_invalid_range_and_host():
         playback_url(host="bad/host", port=554, username="", password="", track="601", start="2026-01-01T01:00:00Z",
                      end="2026-01-01T00:00:00Z", mode=TimestampMode.UTC, nvr_timezone="UTC")
 
+
+def test_configurable_path_placeholders():
+    assert render_path("/custom/{channel}/{stream}/{track}", track="602", channel=6, stream="sub") == "/custom/6/sub/602"
+    req = playback_url(host="nvr.test", port=554, username="", password="", track="602",
+                       start="2026-08-23T20:00:00Z", end="2026-08-23T20:00:15Z", mode=TimestampMode.UTC,
+                       nvr_timezone="Europe/London", path_template="/custom/{channel}/{stream}/{track}",
+                       channel=6, stream="sub")
+    assert req.redacted_url.startswith("rtsp://***:***@nvr.test:554/custom/6/sub/602?")
+
+
+@pytest.mark.parametrize("template", ["rtsp://other/track", "/track/{unknown}", "/track/../secret", "/track/{track}?x=1"])
+def test_unsafe_path_templates_are_rejected(template):
+    with pytest.raises(ValueError):
+        render_path(template, track="101", channel=1, stream="main")

@@ -51,7 +51,8 @@ def event_playback(row: dict, stream="main", mode=None, offset=None, duration=No
                         password=settings.nvr_password, track=c.main_track if stream == "main" else c.sub_track,
                         start=row["started_at"], end=end, mode=TimestampMode(mode or row["timestamp_mode"]),
                         nvr_timezone=settings.nvr_timezone, offset_minutes=offset if offset is not None else row["applied_offset"],
-                        pre_roll=row["pre_roll"], post_roll=row["post_roll"], max_seconds=settings.max_clip_seconds)
+                        pre_roll=row["pre_roll"], post_roll=row["post_roll"], max_seconds=settings.max_clip_seconds,
+                        path_template=settings.rtsp_path_template, channel=c.nvr_channel, stream=stream)
 
 
 async def handle_state(event: dict):
@@ -121,7 +122,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.2", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static), name="static")
 
@@ -271,7 +272,8 @@ async def diag_url(test: PlaybackTest):
                            track=c.main_track if test.stream == "main" else c.sub_track, start=test.start, end=end,
                            mode=TimestampMode(test.mode or settings.timestamp_mode), nvr_timezone=settings.nvr_timezone,
                            offset_minutes=test.offset_minutes if test.offset_minutes is not None else settings.manual_offset_minutes,
-                           max_seconds=30)
+                           max_seconds=30, path_template=settings.rtsp_path_template,
+                           channel=c.nvr_channel, stream=test.stream)
     return {"status": "pass", "redacted_url": request.redacted_url, "start_utc": request.start_utc,
             "end_utc": request.end_utc, "playback_start": request.playback_start, "playback_end": request.playback_end}
 
@@ -281,7 +283,8 @@ async def diag_probe(test: PlaybackTest):
     c = channel(test.channel_id); now = datetime.now(timezone.utc)
     req = playback_url(host=settings.nvr_host, port=settings.rtsp_port, username=settings.nvr_username, password=settings.nvr_password,
                        track=c.main_track if test.stream == "main" else c.sub_track, start=now-timedelta(seconds=10), end=now,
-                       mode=TimestampMode.UTC, nvr_timezone=settings.nvr_timezone, max_seconds=15)
+                       mode=TimestampMode.UTC, nvr_timezone=settings.nvr_timezone, max_seconds=15,
+                       path_template=settings.rtsp_path_template, channel=c.nvr_channel, stream=test.stream)
     result = {"status": "pass", "probe": await media.probe(req.url), "url": req.redacted_url}; db.store_diagnostic("probe", result); return result
 
 
@@ -337,7 +340,8 @@ def diagnostic_request(test: PlaybackTest, mode: str | None = None):
                         start=test.start, end=test.start + timedelta(seconds=test.duration_seconds),
                         mode=TimestampMode(mode or test.mode or settings.timestamp_mode), nvr_timezone=settings.nvr_timezone,
                         offset_minutes=test.offset_minutes if test.offset_minutes is not None else settings.manual_offset_minutes,
-                        max_seconds=30)
+                        max_seconds=30, path_template=settings.rtsp_path_template,
+                        channel=c.nvr_channel, stream=test.stream)
 
 
 @app.post("/api/diagnostics/historical-thumbnail")
@@ -392,6 +396,6 @@ async def diag_media(name: str):
 
 
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.0", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.2", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
                             "health": media.health(), "home_assistant_last_connected": ha.last_connected, "test_results": db.diagnostics()}

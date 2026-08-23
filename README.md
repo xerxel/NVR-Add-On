@@ -67,6 +67,7 @@ For an ARM64 build, use `ghcr.io/home-assistant/aarch64-base-python:3.13-alpine3
 |---|---:|---|
 | `nvr_host` | `192.168.0.100` | Validated NVR host/IP; diagnostic endpoints cannot override it. |
 | `rtsp_port` | `554` | NVR RTSP TCP port. |
+| `rtsp_path_template` | `/Streaming/tracks/{track}` | RTSP path used for playback. Supports `{track}`, `{channel}`, and `{stream}` placeholders. Do not include the scheme, host, query string, or credentials. |
 | `nvr_username` / `nvr_password` | empty | Dedicated NVR credentials, stored as add-on options. |
 | `nvr_timezone` | `Europe/London` | IANA zone used by `nvr_local`. |
 | `timestamp_mode` | `utc` | `utc`, `nvr_local`, or `manual_offset`. |
@@ -82,7 +83,9 @@ For an ARM64 build, use `ghcr.io/home-assistant/aarch64-base-python:3.13-alpine3
 | `history_backfill_hours` | `24` | Startup/gap Recorder reconciliation window, max 168. |
 | `log_level` | `info` | `debug`, `info`, `warning`, or `error`; production debug is discouraged. |
 
-The in-app channel editor has exactly eight slots. Each holds enabled state, display name, NVR channel number, motion entity, camera entity, main/sub track IDs, optional timestamp offset, and the thumbnail stream. Use **Diagnostics > Entity discovery** to find IDs, then copy them into the editor. Mappings are atomically stored in `/data/timeline/channels.json`.
+The in-app channel editor has exactly eight slots. Each holds enabled state, display name, NVR channel number, motion entity, camera entity, main/sub track IDs, optional timestamp offset, and the thumbnail stream. New configurations default to `binary_sensor.network_video_recorder_channel_N_motion` and `camera.network_video_recorder_channel_N`, with the appropriate channel number. Use **Diagnostics > Entity discovery** to confirm or replace those IDs. Mappings are atomically stored in `/data/timeline/channels.json`.
+
+If your NVR uses another RTSP layout, change `rtsp_path_template` in the Home Assistant add-on Configuration tab. For example, `/Streaming/tracks/{track}` produces channel 6 track `/Streaming/tracks/601`; `/custom/channel/{channel}/{stream}` can produce `/custom/channel/6/main`. The add-on always appends the bounded Hikvision `starttime` and `endtime` query parameters.
 
 ## Using the timeline
 
@@ -152,4 +155,3 @@ All processing and persistence remain local. No data is sent to a cloud service.
 ## Official references
 
 Packaging follows the current Home Assistant developer documentation for [add-on configuration](https://developers.home-assistant.io/docs/add-ons/configuration/), [repository structure](https://developers.home-assistant.io/docs/add-ons/repository/), [presentation/ingress](https://developers.home-assistant.io/docs/add-ons/presentation/), and [Supervisor communication](https://developers.home-assistant.io/docs/add-ons/communication/). RTSP transport and process behaviour follow the [FFmpeg protocol documentation](https://ffmpeg.org/ffmpeg-protocols.html#rtsp).
-
