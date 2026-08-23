@@ -4,6 +4,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -26,6 +27,7 @@ media = MediaManager(settings, db)
 log = logging.getLogger("timeline")
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 stop_event = asyncio.Event()
+reconcile_lock = asyncio.Lock()
 
 
 def channel(channel_id: int):
@@ -82,8 +84,8 @@ async def quick_snapshot(event_id: str, entity: str):
         db.update(event_id, thumbnail_status="failed", last_error=redact(exc))
 
 
-async def final_thumbnail(event_id: str):
-    await asyncio.sleep(8)
+async def final_thumbnail(event_id: str, delay: int = 8):
+    await asyncio.sleep(delay)
     row = db.event(event_id)
     if not row: return
     try:
@@ -96,19 +98,24 @@ async def final_thumbnail(event_id: str):
 
 
 async def reconcile():
-    for c in settings.channels():
-        if not c.enabled or not c.motion_entity: continue
-        try:
-            states = await ha.history(c.motion_entity, settings.history_backfill_hours)
-            previous = None
-            for state in states:
-                value = state.get("state")
-                if value in {"on", "off"}:
-                    db.transition(c.id, c.motion_entity, previous, value, state.get("last_changed") or state.get("last_updated"), {},
-                                  settings.pre_roll_seconds, settings.post_roll_seconds, settings.timestamp_mode,
-                                  c.timestamp_offset_minutes or settings.manual_offset_minutes, settings.merge_gap_seconds)
-                    previous = value
-        except Exception as exc: log.warning("History reconciliation failed for channel %s: %s", c.id, redact(exc))
+    async with reconcile_lock:
+        for c in settings.channels():
+            if not c.enabled or not c.motion_entity: continue
+            try:
+                states = await ha.history(c.motion_entity, settings.history_backfill_hours)
+                previous = None
+                for state in states:
+                    value = state.get("state")
+                    if value in {"on", "off"}:
+                        event_id = db.transition(c.id, c.motion_entity, previous, value,
+                                                 state.get("last_changed") or state.get("last_updated"), {},
+                                                 settings.pre_roll_seconds, settings.post_roll_seconds, settings.timestamp_mode,
+                                                 c.timestamp_offset_minutes or settings.manual_offset_minutes,
+                                                 settings.merge_gap_seconds)
+                        if event_id and value == "off":
+                            asyncio.create_task(final_thumbnail(event_id, delay=0))
+                        previous = value
+            except Exception as exc: log.warning("History reconciliation failed for channel %s: %s", c.id, redact(exc))
 
 
 @asynccontextmanager
@@ -122,7 +129,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.2", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.3", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static), name="static")
 
@@ -161,7 +168,10 @@ async def config(): return {"settings": settings.safe_summary(), "channels": [c.
 
 
 @app.put("/api/channels")
-async def save_channels(body: ChannelList): settings.save_channels(body); return {"ok": True, "channels": [c.model_dump() for c in body.channels]}
+async def save_channels(body: ChannelList):
+    settings.save_channels(body)
+    asyncio.create_task(reconcile())
+    return {"ok": True, "history_backfill_queued": True, "channels": [c.model_dump() for c in body.channels]}
 
 
 @app.get("/api/entities")
@@ -172,10 +182,12 @@ async def entities(): return await ha.entities()
 async def events(date: str, channel_id: int | None = Query(None, ge=1, le=8), status: str | None = None,
                  limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)):
     try:
-        day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        local_day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(settings.nvr_timezone))
     except ValueError:
         raise HTTPException(422, "Date must use YYYY-MM-DD") from None
-    return {"items": [public_event(x) for x in db.list_events(day.isoformat(), (day + timedelta(days=1)).isoformat(), channel_id, status, limit, offset)]}
+    start_utc = local_day.astimezone(timezone.utc)
+    end_utc = (local_day + timedelta(days=1)).astimezone(timezone.utc)
+    return {"items": [public_event(x) for x in db.list_events(start_utc.isoformat(), end_utc.isoformat(), channel_id, status, limit, offset)]}
 
 
 @app.get("/api/events/{event_id}")
@@ -199,7 +211,9 @@ async def generate(event_id: str):
     row = db.event(event_id)
     if not row: raise HTTPException(404, "Event not found")
     if not settings.nvr_username or not settings.nvr_password: raise HTTPException(409, "NVR credentials are not configured")
-    request = event_playback(row); media.enqueue(event_id, request.url)
+    request = event_playback(row)
+    duration = (request.end_utc - request.start_utc).total_seconds()
+    media.enqueue(event_id, request.url, duration)
     return {"status": db.event(event_id)["video_status"] if event_id not in media.jobs else "generating"}
 
 
@@ -354,7 +368,10 @@ async def diag_historical_thumbnail(test: PlaybackTest):
 @app.post("/api/diagnostics/historical-video")
 async def diag_historical_video(test: PlaybackTest):
     req = diagnostic_request(test); diagnostic_id = f"diag_video_{test.channel_id}"
-    await media.clip(diagnostic_id, req.url)
+    try:
+        await media.clip(diagnostic_id, req.url, test.duration_seconds, raise_errors=True)
+    except Exception as exc:
+        raise HTTPException(502, redact(exc, (settings.nvr_username, settings.nvr_password))) from None
     path = media.videos / f"{diagnostic_id}.mp4"
     if not path.exists():
         raise HTTPException(502, "Historical video generation failed; inspect sanitised add-on logs")
@@ -396,6 +413,6 @@ async def diag_media(name: str):
 
 
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.2", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.3", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
                             "health": media.health(), "home_assistant_last_connected": ha.last_connected, "test_results": db.diagnostics()}

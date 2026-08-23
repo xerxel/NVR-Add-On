@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 - 2026-08-24
+
+- Historical thumbnails now skip initial decoder frames and reject uniform grey
+  output instead of serving it as a successful image.
+- FFmpeg clips have an explicit bounded duration, so Hikvision streams that do
+  not close at `endtime` cannot leave the diagnostic waiting until timeout.
+- Historical video diagnostics return the sanitised FFmpeg failure detail.
+- Saving channel mappings immediately queues history reconciliation; completed
+  backfilled events also queue historical thumbnails.
+- Timeline dates now use `Europe/London` local-day boundaries rather than UTC
+  midnight boundaries.
+
 ## 0.1.2 - 2026-08-24
 
 - Added the configurable `rtsp_path_template` option. It defaults to

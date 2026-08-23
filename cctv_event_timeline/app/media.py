@@ -4,7 +4,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 from .security import redact, safe_name
 
@@ -45,23 +45,31 @@ class MediaManager:
 
     async def thumbnail(self, event_id: str, url: str) -> str:
         name = safe_name(event_id) + ".jpg"; final = self.thumbs / name; temp = self.tmp / (name + ".tmp")
-        async with self.semaphore:
-            await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                             "-i", url, "-frames:v", "1", "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)])
         try:
-            with Image.open(temp) as image:
-                image.verify()
-                if image.width < 1 or image.height < 1 or temp.stat().st_size > 10_000_000: raise MediaError("Invalid thumbnail")
-            temp.replace(final); return name
+            async with self.semaphore:
+                for offset in (2, 4):
+                    await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
+                                     "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
+                                     "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)])
+                    with Image.open(temp) as image:
+                        image.load()
+                        variation = ImageStat.Stat(image.convert("L")).stddev[0]
+                        valid = image.width > 0 and image.height > 0 and temp.stat().st_size <= 10_000_000
+                    if valid and variation >= 3:
+                        temp.replace(final)
+                        return name
+            raise MediaError("NVR returned only blank or uniform thumbnail frames")
         finally: temp.unlink(missing_ok=True)
 
-    async def clip(self, event_id: str, url: str) -> None:
+    async def clip(self, event_id: str, url: str, duration_seconds: float, *, raise_errors: bool = False) -> None:
         name = safe_name(event_id) + ".mp4"; final = self.videos / name; temp = self.tmp / (name + ".tmp")
+        bounded_duration = max(1, min(float(duration_seconds), self.settings.max_clip_seconds))
         self.db.update(event_id, video_status="generating", last_error=None)
         try:
             async with self.semaphore:
                 await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                                 "-i", url, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast",
+                                 "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
+                                 "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast",
                                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-f", "mp4", "-y", str(temp)])
                 out, _ = await self._run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type",
                                           "-of", "json", str(temp)], 20)
@@ -72,13 +80,16 @@ class MediaManager:
             self.db.update(event_id, video_status="ready", video_name=name, video_size=final.stat().st_size,
                            video_duration=duration, video_codec=codec, status="ready")
         except Exception as exc:
-            self.db.update(event_id, video_status="failed", last_error=redact(exc, (self.settings.nvr_username, self.settings.nvr_password)))
+            detail = redact(exc, (self.settings.nvr_username, self.settings.nvr_password))
+            self.db.update(event_id, video_status="failed", last_error=detail)
+            if raise_errors:
+                raise MediaError(detail) from None
         finally:
             temp.unlink(missing_ok=True); self.jobs.pop(event_id, None)
 
-    def enqueue(self, event_id: str, url: str):
+    def enqueue(self, event_id: str, url: str, duration_seconds: float):
         if event_id not in self.jobs:
-            self.jobs[event_id] = asyncio.create_task(self.clip(event_id, url))
+            self.jobs[event_id] = asyncio.create_task(self.clip(event_id, url, duration_seconds))
 
     def delete_clip(self, event: dict):
         if event.get("video_name"): (self.videos / safe_name(Path(event["video_name"]).stem)).with_suffix(".mp4").unlink(missing_ok=True)

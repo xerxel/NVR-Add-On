@@ -33,3 +33,11 @@ def test_ingress_relative_assets():
     with TestClient(app) as client:
         html = client.get("/diagnostics").text
         assert 'href="static/app.css"' in html and 'src="static/app.js"' in html
+
+
+def test_timeline_date_uses_london_local_day():
+    event_id = db.transition(8, "binary_sensor.local_day_test", "off", "on", "2026-08-23T23:30:00Z", {}, 5, 10, "utc", 0, 5)
+    db.transition(8, "binary_sensor.local_day_test", "on", "off", "2026-08-23T23:31:00Z", {}, 5, 10, "utc", 0, 5)
+    with TestClient(app) as client:
+        result = client.get("/api/events", params={"date": "2026-08-24", "channel_id": 8}).json()
+    assert event_id in {item["id"] for item in result["items"]}
