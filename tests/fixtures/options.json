@@ -1,0 +1,9 @@
+{
+  "nvr_host": "nvr.example.test",
+  "rtsp_port": 554,
+  "nvr_username": "fixture-user",
+  "nvr_password": "fixture-password",
+  "nvr_timezone": "Europe/London",
+  "timestamp_mode": "utc"
+}
+

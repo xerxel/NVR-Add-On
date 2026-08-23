@@ -1,0 +1,56 @@
+name: CCTV Event Timeline
+version: 0.1.0
+slug: cctv_event_timeline
+description: Local Hikvision motion-event timeline and historical playback
+url: https://github.com/example/cctv-event-timeline
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:cctv
+panel_title: CCTV Timeline
+homeassistant_api: true
+hassio_api: true
+auth_api: true
+options:
+  nvr_host: 192.168.0.100
+  rtsp_port: 554
+  nvr_username: ""
+  nvr_password: ""
+  nvr_timezone: Europe/London
+  timestamp_mode: utc
+  manual_offset_minutes: 0
+  rtsp_transport: tcp
+  pre_roll_seconds: 5
+  post_roll_seconds: 10
+  max_clip_seconds: 180
+  merge_gap_seconds: 5
+  media_retention_days: 14
+  max_cache_mb: 2048
+  ffmpeg_timeout_seconds: 120
+  max_concurrent_jobs: 1
+  history_backfill_hours: 24
+  log_level: info
+schema:
+  nvr_host: str
+  rtsp_port: port
+  nvr_username: str
+  nvr_password: password
+  nvr_timezone: str
+  timestamp_mode: list(utc|nvr_local|manual_offset)
+  manual_offset_minutes: int(-1440,1440)
+  rtsp_transport: list(tcp|udp)
+  pre_roll_seconds: int(0,120)
+  post_roll_seconds: int(0,120)
+  max_clip_seconds: int(5,3600)
+  merge_gap_seconds: int(0,300)
+  media_retention_days: int(1,365)
+  max_cache_mb: int(128,102400)
+  ffmpeg_timeout_seconds: int(10,1800)
+  max_concurrent_jobs: int(1,4)
+  history_backfill_hours: int(1,168)
+  log_level: list(debug|info|warning|error)
