@@ -53,3 +53,29 @@ def test_session_closes_connection_on_success_and_error(tmp_path, monkeypatch):
     except RuntimeError:
         pass
     assert failing.closed
+
+
+def test_completed_duplicate_is_not_reopened(tmp_path):
+    database = Database(tmp_path / "events.db")
+    event_id = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
+    database.transition(1, "binary_sensor.motion", "on", "off", "2026-08-23T10:00:10Z", {}, 5, 10, "utc", 0, 5)
+
+    assert database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5) is None
+    assert database.transition(1, "binary_sensor.motion", "on", "off", "2026-08-23T10:00:10Z", {}, 5, 10, "utc", 0, 5) is None
+    assert database.event(event_id)["ended_at"] == "2026-08-23T10:00:10+00:00"
+
+
+def test_older_transition_is_not_merged_into_newer_event(tmp_path):
+    database = Database(tmp_path / "events.db")
+    newer = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
+    database.transition(1, "binary_sensor.motion", "on", "off", "2026-08-23T10:00:10Z", {}, 5, 10, "utc", 0, 5)
+
+    older = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T09:00:00Z", {}, 5, 10, "utc", 0, 5)
+    assert older and older != newer
+
+
+def test_clear_before_start_does_not_corrupt_event(tmp_path):
+    database = Database(tmp_path / "events.db")
+    event_id = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
+    assert database.transition(1, "binary_sensor.motion", "on", "off", "2026-08-23T09:59:00Z", {}, 5, 10, "utc", 0, 5) is None
+    assert database.event(event_id)["ended_at"] is None

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,3 +75,21 @@ async def test_clip_has_explicit_duration_and_reports_ready(tmp_path):
 
     assert ffmpeg_args[ffmpeg_args.index("-t") + 1] == "15.000"
     assert any(values.get("video_status") == "ready" for _, values in database.updates)
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_thumbnail_does_not_wait_for_background_queue(tmp_path):
+    manager = MediaManager(settings(tmp_path), FakeDatabase())
+
+    async def fake_run(args, timeout=None):
+        image = Image.new("RGB", (320, 180), "black")
+        ImageDraw.Draw(image).rectangle((0, 0, 160, 180), fill="white")
+        image.save(Path(args[-1]), format="JPEG")
+        return b"", b""
+
+    manager._run = fake_run
+    async with manager.thumbnail_semaphore:
+        name = await asyncio.wait_for(
+            manager.thumbnail("diagnostic_1", "rtsp://hidden", diagnostic=True), timeout=1,
+        )
+    assert name == "diagnostic_1.jpg"

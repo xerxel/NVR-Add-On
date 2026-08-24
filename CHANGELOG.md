@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.7 - 2026-08-24
+
+- Historical-thumbnail diagnostics no longer wait behind 4K video encoding or
+  background/backfill thumbnail queues.
+- Diagnostic frame extraction now has a 30-second maximum and persists its
+  pass/fail result with sanitised detail in the diagnostic report.
+- Health output reports whether diagnostic or background thumbnail extraction
+  is busy.
+- History reconciliation now sorts transitions, ignores exact duplicates,
+  rejects negative merge gaps, and cannot close an event before it starts.
+- Existing events with an invalid stored end time use a bounded 30-second
+  playback fallback instead of returning an unhandled server error.
+
 ## 0.1.6 - 2026-08-24
 
 - All historical playback operations now always use the configured main track:

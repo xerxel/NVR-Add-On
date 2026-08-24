@@ -86,8 +86,8 @@ def playback_url(*, host: str, port: int, username: str, password: str, track: s
     start_utc = parse_time(start) - timedelta(seconds=pre_roll)
     requested_end = parse_time(end) + timedelta(seconds=post_roll)
     end_utc = min(requested_end, start_utc + timedelta(seconds=max_seconds))
-    if end_utc <= start_utc or not track.isdigit() or len(track) > 8:
-        raise ValueError("Invalid playback range or track")
+    if end_utc <= start_utc:
+        raise ValueError("Playback end must be after playback start")
     ps = hik_time(start_utc, mode, nvr_timezone, offset_minutes)
     pe = hik_time(end_utc, mode, nvr_timezone, offset_minutes)
     base = stream_url(host=host, port=port, username=username, password=password, track=track,

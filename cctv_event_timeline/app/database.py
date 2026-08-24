@@ -66,12 +66,15 @@ class Database:
                 existing = db.execute("SELECT started_at FROM open_motion WHERE motion_entity=?", (entity,)).fetchone()
                 if existing:
                     return None
+                event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"cctv:{channel_id}:{timestamp}"))
+                if db.execute("SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone():
+                    return None
                 recent = db.execute("SELECT id,ended_at FROM events WHERE channel_id=? AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1", (channel_id,)).fetchone()
-                if recent and datetime.fromisoformat(timestamp) - datetime.fromisoformat(recent["ended_at"]) <= timedelta(seconds=merge_gap):
+                gap = datetime.fromisoformat(timestamp) - datetime.fromisoformat(recent["ended_at"]) if recent else None
+                if recent and timedelta(0) <= gap <= timedelta(seconds=merge_gap):
                     db.execute("UPDATE events SET ended_at=NULL,status='open',updated_at=? WHERE id=?", (now(), recent["id"]))
                     db.execute("INSERT OR REPLACE INTO open_motion VALUES(?,?,?,?)", (entity, channel_id, timestamp, json.dumps(context)))
                     return recent["id"]
-                event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"cctv:{channel_id}:{timestamp}"))
                 stamp = now()
                 db.execute("INSERT OR IGNORE INTO events(id,channel_id,motion_entity,started_at,context_json,pre_roll,post_roll,timestamp_mode,applied_offset,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                            (event_id, channel_id, entity, timestamp, json.dumps(context), pre, post, mode, offset, stamp, stamp))
@@ -81,9 +84,12 @@ class Database:
                 opened = db.execute("SELECT * FROM open_motion WHERE motion_entity=?", (entity,)).fetchone()
                 if not opened:
                     return None
-                event = db.execute("SELECT id FROM events WHERE channel_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1", (channel_id,)).fetchone()
+                event = db.execute("SELECT id,started_at FROM events WHERE channel_id=? AND motion_entity=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+                                   (channel_id, entity)).fetchone()
                 db.execute("DELETE FROM open_motion WHERE motion_entity=?", (entity,))
                 if event:
+                    if datetime.fromisoformat(timestamp) <= datetime.fromisoformat(event["started_at"]):
+                        return None
                     db.execute("UPDATE events SET ended_at=?,status='finalising',updated_at=? WHERE id=?", (timestamp, now(), event["id"]))
                     return event["id"]
         return None

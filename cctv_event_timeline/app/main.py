@@ -47,7 +47,13 @@ def public_event(row: dict):
 def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None):
     c = channel(row["channel_id"])
     if not c: raise ValueError("Channel mapping no longer exists")
-    end = row.get("ended_at") or (datetime.fromisoformat(row["started_at"]) + timedelta(seconds=30)).isoformat()
+    start = datetime.fromisoformat(row["started_at"])
+    end_value = row.get("ended_at")
+    end_time = datetime.fromisoformat(end_value) if end_value else start + timedelta(seconds=30)
+    if end_time <= start:
+        end_time = start + timedelta(seconds=30)
+        db.update(row["id"], status="partial", last_error="Invalid stored event end time; using a bounded 30-second playback fallback")
+    end = end_time.isoformat()
     if duration: end = (datetime.fromisoformat(row["started_at"]) + timedelta(seconds=duration)).isoformat()
     return playback_url(host=settings.nvr_host, port=settings.rtsp_port, username=settings.nvr_username,
                         password=settings.nvr_password, track=c.main_track if stream == "main" else c.sub_track,
@@ -103,6 +109,7 @@ async def reconcile():
             if not c.enabled or not c.motion_entity: continue
             try:
                 states = await ha.history(c.motion_entity, settings.history_backfill_hours)
+                states = sorted(states, key=lambda state: state.get("last_changed") or state.get("last_updated") or "")
                 previous = None
                 for state in states:
                     value = state.get("state")
@@ -129,7 +136,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.6", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.7", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 index_html = (static / "index.html").read_text(encoding="utf-8")
 app.mount("/static", StaticFiles(directory=static), name="static")
@@ -212,7 +219,10 @@ async def generate(event_id: str):
     row = db.event(event_id)
     if not row: raise HTTPException(404, "Event not found")
     if not settings.nvr_username or not settings.nvr_password: raise HTTPException(409, "NVR credentials are not configured")
-    request = event_playback(row)
+    try:
+        request = event_playback(row)
+    except ValueError as exc:
+        raise HTTPException(422, redact(exc, (settings.nvr_username, settings.nvr_password))) from None
     duration = (request.end_utc - request.start_utc).total_seconds()
     media.enqueue(event_id, request.url, duration)
     return {"status": db.event(event_id)["video_status"] if event_id not in media.jobs else "generating"}
@@ -366,8 +376,20 @@ def diagnostic_request(test: PlaybackTest, mode: str | None = None):
 @app.post("/api/diagnostics/historical-thumbnail")
 async def diag_historical_thumbnail(test: PlaybackTest):
     req = diagnostic_request(test)
-    name = await media.thumbnail(f"diag_nvr_{test.channel_id}", req.url)
-    return {"status": "pass", "redacted_url": req.redacted_url, "image_url": f"api/diagnostics/media/{name}"}
+    started = time.monotonic()
+    try:
+        name = await media.thumbnail(f"diag_nvr_{test.channel_id}", req.url, diagnostic=True)
+        result = {"status": "pass", "duration_ms": round((time.monotonic()-started)*1000),
+                  "redacted_url": req.redacted_url, "playback_stream": "main",
+                  "image_url": f"api/diagnostics/media/{name}"}
+    except Exception as exc:
+        detail = redact(exc, (settings.nvr_username, settings.nvr_password))
+        result = {"status": "fail", "duration_ms": round((time.monotonic()-started)*1000),
+                  "redacted_url": req.redacted_url, "playback_stream": "main", "detail": detail}
+        db.store_diagnostic("historical_thumbnail", result)
+        raise HTTPException(502, detail) from None
+    db.store_diagnostic("historical_thumbnail", result)
+    return result
 
 
 @app.post("/api/diagnostics/historical-video")
@@ -418,6 +440,6 @@ async def diag_media(name: str):
 
 
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.6", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.7", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
                             "health": media.health(), "home_assistant_last_connected": ha.last_connected, "test_results": db.diagnostics()}

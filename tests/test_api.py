@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app.main import app, db, diagnostic_request
+from app.main import app, db, diagnostic_request, event_playback
 from app.models import PlaybackTest
 from fastapi.testclient import TestClient
 
@@ -37,11 +37,11 @@ def test_ingress_relative_assets():
 
 
 def test_timeline_date_uses_london_local_day():
-    event_id = db.transition(8, "binary_sensor.local_day_test", "off", "on", "2026-08-23T23:30:00Z", {}, 5, 10, "utc", 0, 5)
+    db.transition(8, "binary_sensor.local_day_test", "off", "on", "2026-08-23T23:30:00Z", {}, 5, 10, "utc", 0, 5)
     db.transition(8, "binary_sensor.local_day_test", "on", "off", "2026-08-23T23:31:00Z", {}, 5, 10, "utc", 0, 5)
     with TestClient(app) as client:
         result = client.get("/api/events", params={"date": "2026-08-24", "channel_id": 8}).json()
-    assert event_id in {item["id"] for item in result["items"]}
+    assert "2026-08-23T23:30:00+00:00" in {item["started_at"] for item in result["items"]}
 
 
 def test_historical_diagnostics_force_main_track_when_sub_requested():
@@ -55,3 +55,11 @@ def test_historical_diagnostics_force_main_track_when_sub_requested():
         result = client.post("/api/diagnostics/playback-url", json=test.model_dump(mode="json")).json()
     assert "/Streaming/tracks/101?" in result["redacted_url"]
     assert result["playback_stream"] == "main"
+
+
+def test_corrupt_event_range_gets_bounded_playback_fallback():
+    request = event_playback({"id": "missing-test-event", "channel_id": 1,
+                              "started_at": "2026-08-23T10:00:00+00:00",
+                              "ended_at": "2026-08-23T09:59:00+00:00", "timestamp_mode": "utc",
+                              "applied_offset": 0, "pre_roll": 5, "post_roll": 10})
+    assert (request.end_utc - request.start_utc).total_seconds() == 45

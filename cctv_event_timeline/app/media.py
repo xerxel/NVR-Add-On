@@ -18,7 +18,9 @@ class MediaManager:
         self.root = settings.data_dir / "cache"
         self.thumbs, self.videos, self.tmp = self.root / "thumbs", self.root / "videos", settings.data_dir / "tmp"
         for p in (self.thumbs, self.videos, self.tmp): p.mkdir(parents=True, exist_ok=True)
-        self.semaphore = asyncio.Semaphore(settings.max_concurrent_jobs)
+        self.clip_semaphore = asyncio.Semaphore(settings.max_concurrent_jobs)
+        self.thumbnail_semaphore = asyncio.Semaphore(1)
+        self.diagnostic_thumbnail_semaphore = asyncio.Semaphore(1)
         self.jobs: dict[str, asyncio.Task] = {}
         for abandoned in self.tmp.glob("*.tmp"): abandoned.unlink(missing_ok=True)
 
@@ -43,14 +45,16 @@ class MediaManager:
         return {"streams": [{k: s.get(k) for k in ("codec_type", "codec_name", "width", "height", "r_frame_rate")}
                             for s in data.get("streams", [])], "duration": data.get("format", {}).get("duration")}
 
-    async def thumbnail(self, event_id: str, url: str) -> str:
+    async def thumbnail(self, event_id: str, url: str, *, diagnostic: bool = False) -> str:
         name = safe_name(event_id) + ".jpg"; final = self.thumbs / name; temp = self.tmp / (name + ".tmp")
         try:
-            async with self.semaphore:
+            semaphore = self.diagnostic_thumbnail_semaphore if diagnostic else self.thumbnail_semaphore
+            async with semaphore:
                 for offset in (2, 4):
                     await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
                                      "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
-                                     "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)])
+                                     "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)],
+                                    min(30, self.settings.ffmpeg_timeout_seconds))
                     with Image.open(temp) as image:
                         image.load()
                         variation = ImageStat.Stat(image.convert("L")).stddev[0]
@@ -66,7 +70,7 @@ class MediaManager:
         bounded_duration = max(1, min(float(duration_seconds), self.settings.max_clip_seconds))
         self.db.update(event_id, video_status="generating", last_error=None)
         try:
-            async with self.semaphore:
+            async with self.clip_semaphore:
                 await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
                                  "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
                                  "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast",
@@ -107,4 +111,6 @@ class MediaManager:
             size = p.stat().st_size; p.unlink(missing_ok=True); total -= size
 
     def health(self):
-        return {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"), "active_jobs": len(self.jobs)}
+        return {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
+                "active_jobs": len(self.jobs), "diagnostic_thumbnail_busy": self.diagnostic_thumbnail_semaphore.locked(),
+                "background_thumbnail_busy": self.thumbnail_semaphore.locked()}
