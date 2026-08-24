@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 - 2026-08-24
+
+- Fixed SQLite connections accumulating until the container exhausted its file
+  descriptor limit. Every transaction now closes its connection in `finally`.
+- Cached the small frontend entry document at application startup instead of
+  reopening it on every navigation request.
+
 ## 0.1.4 - 2026-08-24
 
 - Separated RTSP live and historical playback paths. Live probing defaults to

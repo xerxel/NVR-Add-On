@@ -2,6 +2,7 @@ import json
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._lock = threading.RLock()
-        with self.connect() as db:
+        with self.session() as db:
             db.executescript(SCHEMA)
 
     def connect(self):
@@ -46,11 +47,21 @@ class Database:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def session(self):
+        """Provide a transactional connection and always release its descriptor."""
+        db = self.connect()
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
     def transition(self, channel_id: int, entity: str, old: str | None, new: str,
                    timestamp: str, context: dict, pre: int, post: int, mode: str,
                    offset: int, merge_gap: int) -> str | None:
         timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
-        with self._lock, self.connect() as db:
+        with self._lock, self.session() as db:
             if new == "on" and old != "on":
                 existing = db.execute("SELECT started_at FROM open_motion WHERE motion_entity=?", (entity,)).fetchone()
                 if existing:
@@ -85,11 +96,11 @@ class Database:
         if status:
             query += " AND status=?"; args.append(status)
         query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"; args.extend([limit, offset])
-        with self.connect() as db:
+        with self.session() as db:
             return [dict(x) for x in db.execute(query, args)]
 
     def event(self, event_id: str):
-        with self.connect() as db:
+        with self.session() as db:
             row = db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
             return dict(row) if row else None
 
@@ -98,15 +109,14 @@ class Database:
                    "video_name", "video_size", "video_duration", "video_codec", "last_error", "retry_count"}
         values = {k: v for k, v in values.items() if k in allowed}
         values["updated_at"] = now()
-        with self.connect() as db:
+        with self.session() as db:
             db.execute(f"UPDATE events SET {','.join(f'{k}=?' for k in values)} WHERE id=?", [*values.values(), event_id])
 
     def store_diagnostic(self, name: str, result: dict):
-        with self.connect() as db:
+        with self.session() as db:
             db.execute("INSERT OR REPLACE INTO diagnostics VALUES(?,?,?)", (name, json.dumps(result), now()))
 
     def diagnostics(self):
-        with self.connect() as db:
+        with self.session() as db:
             return [{"name": r["name"], "result": json.loads(r["result_json"]), "updated_at": r["updated_at"]}
                     for r in db.execute("SELECT * FROM diagnostics ORDER BY updated_at DESC")]
-
