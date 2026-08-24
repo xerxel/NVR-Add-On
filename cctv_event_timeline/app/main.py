@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -18,10 +18,12 @@ from .hikvision import TimestampMode, playback_url, stream_url
 from .homeassistant import HomeAssistantClient
 from .log_buffer import SanitizedLogBuffer
 from .media import MediaManager
-from .models import ChannelList, HistoryTest, PlaybackTest
+from .models import ChannelList, HistoryTest, PlaybackTest, VlcCredentials
 from .security import redact, safe_name
 from .storage import cpu_report, storage_report
 from .task_tracker import TaskTracker
+from .vlc_credentials import COOKIE_NAME as VLC_COOKIE_NAME
+from .vlc_credentials import VlcCredentialStore
 
 settings = Settings.load()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -32,6 +34,7 @@ media = MediaManager(settings, db, task_tracker)
 log = logging.getLogger("timeline")
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 runtime_logs = SanitizedLogBuffer((settings.nvr_username, settings.nvr_password))
+vlc_credentials = VlcCredentialStore(settings.data_dir)
 stop_event = asyncio.Event()
 reconcile_lock = asyncio.Lock()
 thumbnail_recovery_lock = asyncio.Lock()
@@ -60,10 +63,15 @@ def public_event(row: dict):
     c = channel(row["channel_id"]); result["camera_name"] = c.name if c else f"Camera {row['channel_id']}"
     result["thumbnail_url"] = f"api/events/{row['id']}/thumbnail" if row.get("thumbnail_name") else None
     result["video_url"] = f"api/events/{row['id']}/video" if row.get("video_status") == "ready" else None
+    try:
+        result["redacted_rtsp_url"] = event_playback(row).redacted_url
+    except ValueError:
+        result["redacted_rtsp_url"] = None
     return result
 
 
-def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None):
+def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None,
+                   credentials: tuple[str, str] | None = None):
     c = channel(row["channel_id"])
     if not c: raise ValueError("Channel mapping no longer exists")
     start = datetime.fromisoformat(row["started_at"])
@@ -74,8 +82,9 @@ def event_playback(row: dict, stream="main", mode=None, offset=None, duration=No
         db.update(row["id"], status="partial", last_error="Invalid stored event end time; using a bounded 30-second playback fallback")
     end = end_time.isoformat()
     if duration: end = (datetime.fromisoformat(row["started_at"]) + timedelta(seconds=duration)).isoformat()
-    return playback_url(host=settings.nvr_host, port=settings.rtsp_port, username=settings.nvr_username,
-                        password=settings.nvr_password, track=c.main_track if stream == "main" else c.sub_track,
+    username, password = credentials if credentials is not None else (settings.nvr_username, settings.nvr_password)
+    return playback_url(host=settings.nvr_host, port=settings.rtsp_port, username=username,
+                        password=password, track=c.main_track if stream == "main" else c.sub_track,
                         start=row["started_at"], end=end, mode=TimestampMode(mode or row["timestamp_mode"]),
                         nvr_timezone=settings.nvr_timezone, offset_minutes=offset if offset is not None else row["applied_offset"],
                         pre_roll=row["pre_roll"], post_roll=row["post_roll"], max_seconds=settings.max_clip_seconds,
@@ -161,6 +170,26 @@ async def reconcile():
             asyncio.create_task(recover_pending_thumbnails())
 
 
+async def refresh_camera_codecs():
+    channels = [item for item in settings.channels() if item.enabled]
+    async with task_tracker.track("codec_validation", {"camera_count": len(channels)}) as task_id:
+        for item in channels:
+            task_tracker.update(task_id, phase="probing_camera", details={
+                "channel_id": item.id, "camera_name": item.name, "track": item.main_track,
+            })
+            try:
+                request = stream_url(
+                    host=settings.nvr_host, port=settings.rtsp_port, username=settings.nvr_username,
+                    password=settings.nvr_password, track=item.main_track,
+                    path_template=settings.live_rtsp_path_template, channel=item.nvr_channel, stream="main",
+                )
+                await media.codec_for(item.id, item.main_track, request.url)
+            except Exception as exc:
+                log.warning("Codec validation failed for channel %s: %s", item.id,
+                            redact(exc, (settings.nvr_username, settings.nvr_password)))
+        task_tracker.update(task_id, phase="complete")
+
+
 async def home_assistant_subscription():
     async with task_tracker.track("home_assistant_subscription") as task_id:
         task_tracker.update(task_id, phase="connected_or_reconnecting")
@@ -223,7 +252,37 @@ async def save_channels(body: ChannelList):
     settings.save_channels(body)
     db.clear_camera_codecs()
     asyncio.create_task(reconcile())
-    return {"ok": True, "history_backfill_queued": True, "channels": [c.model_dump() for c in body.channels]}
+    asyncio.create_task(refresh_camera_codecs())
+    return {"ok": True, "history_backfill_queued": True, "codec_validation_queued": True,
+            "channels": [c.model_dump() for c in body.channels]}
+
+
+def vlc_cookie_secure(request: Request) -> bool:
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded == "https"
+
+
+@app.get("/api/vlc-credentials")
+async def vlc_credential_status(request: Request):
+    configured = vlc_credentials.decrypt(request.cookies.get(VLC_COOKIE_NAME)) is not None
+    return JSONResponse({"configured": configured}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/vlc-credentials")
+async def save_vlc_credentials(body: VlcCredentials, request: Request):
+    response = JSONResponse({"configured": True}, headers={"Cache-Control": "no-store"})
+    response.set_cookie(
+        VLC_COOKIE_NAME, vlc_credentials.encrypt(body.username, body.password), max_age=180 * 86400,
+        httponly=True, secure=vlc_cookie_secure(request), samesite="strict", path="/",
+    )
+    return response
+
+
+@app.delete("/api/vlc-credentials")
+async def clear_vlc_credentials(request: Request):
+    response = JSONResponse({"configured": False}, headers={"Cache-Control": "no-store"})
+    response.delete_cookie(VLC_COOKIE_NAME, path="/", secure=vlc_cookie_secure(request), samesite="strict")
+    return response
 
 
 @app.get("/api/entities")
@@ -247,6 +306,19 @@ async def event(event_id: str):
     row = db.event(event_id)
     if not row: raise HTTPException(404, "Event not found")
     return public_event(row)
+
+
+@app.get("/api/events/{event_id}/vlc")
+async def open_in_vlc(event_id: str, request: Request):
+    row = db.event(event_id)
+    if not row:
+        raise HTTPException(404, "Event not found")
+    credentials = vlc_credentials.decrypt(request.cookies.get(VLC_COOKIE_NAME)) or ("", "")
+    try:
+        playback = event_playback(row, credentials=credentials)
+    except ValueError as exc:
+        raise HTTPException(422, redact(exc, credentials)) from None
+    return RedirectResponse(playback.url, status_code=302, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/events/{event_id}/thumbnail")

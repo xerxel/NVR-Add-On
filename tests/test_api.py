@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import app.main as main
 from app.main import app, db, diagnostic_request, event_playback
 from app.models import PlaybackTest
 from fastapi.testclient import TestClient
@@ -38,10 +39,13 @@ def test_ingress_relative_assets():
         assert 'id="video-failure"' in html and 'id="failure-details"' in html
         assert 'id="resource-usage"' in html and 'id="storage-bar"' in html
         assert 'id="addon-cpu"' in html and 'id="system-cpu"' in html
+        assert 'id="vlc-settings"' in html and 'id="open-vlc"' in html and 'id="rtsp-url"' in html
         script = client.get("/static/app.js").text
         style = client.get("/static/app.css").text
         assert "codec-pill" in script and "stream_url" in script and "generation_details" in script
         assert "api/diagnostics/storage" in script and "api/diagnostics/cpu" in script
+        assert "api/vlc-credentials" in script and "api/events/${currentEvent.id}/vlc" in script
+        assert "'H.265':'h265'" in script and ".codec-pill.h265{background:#7b1f2b}" in style
         assert "grid-template-columns:repeat(auto-fill,minmax(250px,1fr))" in style
         assert "aspect-ratio:32/9" in style and "object-fit:cover" in style
 
@@ -101,3 +105,19 @@ def test_corrupt_event_range_gets_bounded_playback_fallback():
                               "ended_at": "2026-08-23T09:59:00+00:00", "timestamp_mode": "utc",
                               "applied_offset": 0, "pre_roll": 5, "post_roll": 10})
     assert (request.end_utc - request.start_utc).total_seconds() == 45
+
+
+async def no_background_work():
+    return None
+
+
+def test_save_mappings_queues_codec_validation(monkeypatch):
+    monkeypatch.setattr(main, "reconcile", no_background_work)
+    monkeypatch.setattr(main, "refresh_camera_codecs", no_background_work)
+    channels = [item.model_dump(mode="json") for item in main.settings.channels()]
+
+    with TestClient(app) as client:
+        response = client.put("/api/channels", json={"channels": channels})
+
+    assert response.status_code == 200
+    assert response.json()["codec_validation_queued"] is True

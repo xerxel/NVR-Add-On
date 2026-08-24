@@ -62,3 +62,15 @@ class HistoryTest(BaseModel):
     channel_id: int = Field(ge=1, le=8)
     hours: int = Field(default=1, ge=1, le=24)
     import_events: bool = False
+
+
+class VlcCredentials(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
+
+    @field_validator("username", "password")
+    @classmethod
+    def no_control_characters(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("VLC credentials cannot contain control characters")
+        return value
