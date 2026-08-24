@@ -161,3 +161,59 @@ async def test_process_limit_applies_across_all_media_commands(tmp_path, monkeyp
     release_first.set()
     await asyncio.gather(first, second)
     assert starts == 2
+
+
+@pytest.mark.asyncio
+async def test_user_clip_preempts_thumbnail_and_thumbnail_resumes_after_clip(tmp_path):
+    database = FakeDatabase()
+    manager = MediaManager(settings(tmp_path), database)
+    thumbnail_started = asyncio.Event()
+    thumbnail_cancelled = asyncio.Event()
+    clip_started = asyncio.Event()
+    release_clip = asyncio.Event()
+    thumbnail_attempts = 0
+
+    async def fake_run(args, timeout=None):
+        nonlocal thumbnail_attempts
+        target = Path(args[-1])
+        if args[0] == "ffmpeg" and "-frames:v" in args:
+            thumbnail_attempts += 1
+            if thumbnail_attempts == 1:
+                thumbnail_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    thumbnail_cancelled.set()
+                    raise
+            image = Image.new("RGB", (320, 180), "black")
+            ImageDraw.Draw(image).rectangle((0, 0, 160, 180), fill="white")
+            image.save(target, format="JPEG")
+            return b"", b""
+        if args[0] == "ffmpeg":
+            clip_started.set()
+            await release_clip.wait()
+            target.write_bytes(b"mock-mp4")
+            return b"", b""
+        if str(target).startswith("rtsp://"):
+            return json.dumps({"format": {}, "streams": [
+                {"codec_type": "video", "codec_name": "h264"},
+            ]}).encode(), b""
+        return json.dumps({"format": {"duration": "15.0"}, "streams": [
+            {"codec_type": "video", "codec_name": "h264"},
+        ]}).encode(), b""
+
+    manager._run = fake_run
+    thumbnail = asyncio.create_task(manager.thumbnail("thumbnail_event", "rtsp://thumbnail"))
+    await thumbnail_started.wait()
+
+    manager.enqueue("clip_event", "rtsp://clip", 15)
+    clip = manager.jobs["clip_event"]
+    await asyncio.wait_for(thumbnail_cancelled.wait(), timeout=1)
+    await asyncio.wait_for(clip_started.wait(), timeout=1)
+
+    assert not manager.background_thumbnails_allowed.is_set()
+    release_clip.set()
+    await asyncio.wait_for(clip, timeout=1)
+    assert manager.background_thumbnails_allowed.is_set()
+    assert await asyncio.wait_for(thumbnail, timeout=1) == "thumbnail_event.jpg"
+    assert thumbnail_attempts == 2

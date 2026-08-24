@@ -33,6 +33,9 @@ class MediaManager:
         self.thumbnail_semaphore = asyncio.Semaphore(1)
         self.diagnostic_thumbnail_semaphore = asyncio.Semaphore(1)
         self.jobs: dict[str, asyncio.Task] = {}
+        self.background_thumbnails_allowed = asyncio.Event()
+        self.background_thumbnails_allowed.set()
+        self._background_thumbnail_process: asyncio.Task | None = None
         for abandoned in self.tmp.glob("*.tmp"): abandoned.unlink(missing_ok=True)
 
     @asynccontextmanager
@@ -110,13 +113,16 @@ class MediaManager:
                 if self.tracker and task_id:
                     self.tracker.update(task_id, phase="waiting_for_worker")
                 async with semaphore:
-                    if self.tracker and task_id:
-                        self.tracker.update(task_id, phase="extracting_frame")
                     for offset in (2, 4):
-                        await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                                         "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
-                                         "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)],
-                                        min(30, self.settings.ffmpeg_timeout_seconds))
+                        args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
+                                "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
+                                "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)]
+                        if diagnostic:
+                            if self.tracker and task_id:
+                                self.tracker.update(task_id, phase="extracting_frame")
+                            await self._run(args, min(30, self.settings.ffmpeg_timeout_seconds))
+                        else:
+                            await self._run_background_thumbnail(args, task_id)
                         with Image.open(temp) as image:
                             image.load()
                             variation = ImageStat.Stat(image.convert("L")).stddev[0]
@@ -126,6 +132,34 @@ class MediaManager:
                             return name
                 raise MediaError("NVR returned only blank or uniform thumbnail frames")
             finally: temp.unlink(missing_ok=True)
+
+    async def _run_background_thumbnail(self, args: list[str], task_id: str | None) -> None:
+        """Run a retryable thumbnail process that yields immediately to a user clip."""
+        while True:
+            if self.tracker and task_id:
+                phase = "extracting_frame" if self.background_thumbnails_allowed.is_set() else "paused_for_historical_video"
+                self.tracker.update(task_id, phase=phase)
+            await self.background_thumbnails_allowed.wait()
+            if self.tracker and task_id:
+                self.tracker.update(task_id, phase="extracting_frame")
+            operation = asyncio.create_task(
+                self._run(args, min(30, self.settings.ffmpeg_timeout_seconds)),
+            )
+            self._background_thumbnail_process = operation
+            try:
+                await operation
+                return
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current and current.cancelling():
+                    raise
+                if self.background_thumbnails_allowed.is_set():
+                    raise
+                if self.tracker and task_id:
+                    self.tracker.update(task_id, phase="paused_for_historical_video")
+            finally:
+                if self._background_thumbnail_process is operation:
+                    self._background_thumbnail_process = None
 
     async def clip(self, event_id: str, url: str, duration_seconds: float, *, raise_errors: bool = False) -> None:
         name = safe_name(event_id) + ".mp4"; final = self.videos / name; temp = self.tmp / (name + ".tmp")
@@ -168,9 +202,14 @@ class MediaManager:
                 raise MediaError(detail) from None
         finally:
             temp.unlink(missing_ok=True); self.jobs.pop(event_id, None)
+            if not self.jobs:
+                self.background_thumbnails_allowed.set()
 
     def enqueue(self, event_id: str, url: str, duration_seconds: float):
         if event_id not in self.jobs:
+            self.background_thumbnails_allowed.clear()
+            if self._background_thumbnail_process and not self._background_thumbnail_process.done():
+                self._background_thumbnail_process.cancel()
             self.jobs[event_id] = asyncio.create_task(self.clip(event_id, url, duration_seconds))
 
     def delete_clip(self, event: dict):
@@ -191,4 +230,5 @@ class MediaManager:
     def health(self):
         return {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
                 "active_jobs": len(self.jobs), "diagnostic_thumbnail_busy": self.diagnostic_thumbnail_semaphore.locked(),
-                "background_thumbnail_busy": self.thumbnail_semaphore.locked()}
+                "background_thumbnail_busy": self.thumbnail_semaphore.locked(),
+                "background_thumbnail_paused": not self.background_thumbnails_allowed.is_set()}
