@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.13 - 2026-08-24
+
+- Moved the changelog beside the app configuration so Home Assistant can show
+  release notes in its update dialog.
+- Added the documented Home Assistant version, app-type, and architecture image
+  labels to locally built images.
+- Added a release-metadata contract test that keeps `config.yaml`, the API
+  version, image labels, and changelog aligned for future releases.
+
 ## 0.1.12 - 2026-08-24
 
 - User-requested historical clips now take priority over background thumbnail
