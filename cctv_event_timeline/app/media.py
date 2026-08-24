@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,11 +10,16 @@ from PIL import Image, ImageStat
 
 from .security import redact, safe_name
 
+_TERMINATE_SIGNAL = getattr(signal, "SIGTERM", 15)
+_KILL_SIGNAL = getattr(signal, "SIGKILL", 9)
+
 
 class MediaError(RuntimeError): pass
 
 
 class MediaManager:
+    _PROCESS_STOP_GRACE_SECONDS = 2
+
     def __init__(self, settings, database, tracker=None):
         self.settings, self.db = settings, database
         self.tracker = tracker
@@ -21,6 +27,9 @@ class MediaManager:
         self.thumbs, self.videos, self.tmp = self.root / "thumbs", self.root / "videos", settings.data_dir / "tmp"
         for p in (self.thumbs, self.videos, self.tmp): p.mkdir(parents=True, exist_ok=True)
         self.clip_semaphore = asyncio.Semaphore(settings.max_concurrent_jobs)
+        # Apply the configured limit to every ffmpeg/ffprobe child, including
+        # thumbnails, rather than allowing each kind of media job its own pool.
+        self.process_semaphore = asyncio.Semaphore(settings.max_concurrent_jobs)
         self.thumbnail_semaphore = asyncio.Semaphore(1)
         self.diagnostic_thumbnail_semaphore = asyncio.Semaphore(1)
         self.jobs: dict[str, asyncio.Task] = {}
@@ -39,19 +48,51 @@ class MediaManager:
         async with self._activity("media_process", {"executable": Path(args[0]).name,
                                                      "timeout_seconds": operation_timeout}) as task_id:
             if self.tracker and task_id:
-                self.tracker.update(task_id, phase="running")
-            try:
-                process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                                                               start_new_session=True)
-                stdout, stderr = await asyncio.wait_for(process.communicate(), operation_timeout)
-            except asyncio.TimeoutError:
-                try: os.killpg(process.pid, 15)
-                except (ProcessLookupError, AttributeError): process.terminate()
-                await process.wait()
-                raise MediaError("Media operation timed out") from None
+                self.tracker.update(task_id, phase="waiting_for_worker")
+            async with self.process_semaphore:
+                if self.tracker and task_id:
+                    self.tracker.update(task_id, phase="running")
+                process = await asyncio.create_subprocess_exec(
+                    *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
+                )
+                communicate = asyncio.create_task(process.communicate())
+                try:
+                    stdout, stderr = await asyncio.wait_for(asyncio.shield(communicate), operation_timeout)
+                except asyncio.TimeoutError:
+                    await self._stop_process(process, communicate)
+                    raise MediaError(f"Media operation timed out after {operation_timeout} seconds") from None
+                except asyncio.CancelledError:
+                    await self._stop_process(process, communicate)
+                    raise
             if process.returncode:
                 raise MediaError(redact(stderr.decode(errors="replace")[-1500:], (self.settings.nvr_username, self.settings.nvr_password)))
             return stdout, stderr
+
+    async def _stop_process(self, process, communicate: asyncio.Task) -> None:
+        """Stop a child process without allowing an unresponsive child to hang the caller."""
+        self._signal_process(process, _TERMINATE_SIGNAL)
+        try:
+            await asyncio.wait_for(asyncio.shield(communicate), self._PROCESS_STOP_GRACE_SECONDS)
+            return
+        except asyncio.TimeoutError:
+            self._signal_process(process, _KILL_SIGNAL)
+        try:
+            await asyncio.wait_for(asyncio.shield(communicate), self._PROCESS_STOP_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            communicate.cancel()
+            await asyncio.gather(communicate, return_exceptions=True)
+
+    @staticmethod
+    def _signal_process(process, sig: int) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, AttributeError, OSError):
+            try:
+                process.kill() if sig == _KILL_SIGNAL else process.terminate()
+            except ProcessLookupError:
+                pass
 
     async def probe(self, url: str) -> dict:
         out, _ = await self._run(["ffprobe", "-v", "error", "-rtsp_transport", self.settings.rtsp_transport,

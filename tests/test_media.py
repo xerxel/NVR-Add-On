@@ -94,3 +94,70 @@ async def test_diagnostic_thumbnail_does_not_wait_for_background_queue(tmp_path)
             manager.thumbnail("diagnostic_1", "rtsp://hidden", diagnostic=True), timeout=1,
         )
     assert name == "diagnostic_1.jpg"
+
+
+@pytest.mark.asyncio
+async def test_run_escalates_from_terminate_to_kill_when_child_hangs(tmp_path, monkeypatch):
+    manager = MediaManager(settings(tmp_path), FakeDatabase())
+    manager._PROCESS_STOP_GRACE_SECONDS = 0.01
+    killed = asyncio.Event()
+    signals = []
+
+    class HungProcess:
+        pid = 1234
+        returncode = None
+
+        async def communicate(self):
+            await killed.wait()
+            self.returncode = -9
+            return b"", b""
+
+        def terminate(self):
+            signals.append("terminate")
+
+        def kill(self):
+            signals.append("kill")
+            killed.set()
+
+    async def fake_subprocess(*args, **kwargs):
+        return HungProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+
+    with pytest.raises(Exception, match="timed out after 0.01 seconds"):
+        await manager._run(["ffmpeg", "-version"], timeout=0.01)
+
+    assert signals == ["terminate", "kill"]
+
+
+@pytest.mark.asyncio
+async def test_process_limit_applies_across_all_media_commands(tmp_path, monkeypatch):
+    manager = MediaManager(settings(tmp_path), FakeDatabase())
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    starts = 0
+
+    class Process:
+        returncode = 0
+        pid = 1234
+
+        async def communicate(self):
+            nonlocal starts
+            starts += 1
+            if starts == 1:
+                first_started.set()
+                await release_first.wait()
+            return b"", b""
+
+    async def fake_subprocess(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    first = asyncio.create_task(manager._run(["ffmpeg", "first"]))
+    await first_started.wait()
+    second = asyncio.create_task(manager._run(["ffprobe", "second"]))
+    await asyncio.sleep(0)
+    assert starts == 1
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert starts == 2
