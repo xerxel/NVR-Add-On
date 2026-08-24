@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from app.hikvision import TimestampMode, default_tracks, hik_time, playback_url, render_path
+from app.hikvision import TimestampMode, default_tracks, hik_time, playback_url, render_path, stream_url
 
 
 def test_all_default_tracks():
@@ -60,3 +60,10 @@ def test_configurable_path_placeholders():
 def test_unsafe_path_templates_are_rejected(template):
     with pytest.raises(ValueError):
         render_path(template, track="101", channel=1, stream="main")
+
+
+def test_live_stream_url_has_no_playback_query():
+    request = stream_url(host="nvr.test", port=554, username="user", password="secret", track="102",
+                         path_template="/Streaming/channels/{track}", channel=1, stream="sub")
+    assert request.redacted_url == "rtsp://***:***@nvr.test:554/Streaming/channels/102"
+    assert "starttime" not in request.url and "endtime" not in request.url

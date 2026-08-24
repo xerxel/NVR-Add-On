@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4 - 2026-08-24
+
+- Separated RTSP live and historical playback paths. Live probing defaults to
+  `/Streaming/channels/{track}`; historical thumbnails and videos default to
+  `/Streaming/tracks/{track}`.
+- Legacy `rtsp_path_template` values migrate to the live path only, preventing
+  a live Hikvision endpoint from silently ignoring historical timestamps.
+
 ## 0.1.3 - 2026-08-24
 
 - Historical thumbnails now skip initial decoder frames and reject uniform grey

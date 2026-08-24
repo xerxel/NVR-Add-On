@@ -59,6 +59,24 @@ class PlaybackRequest:
     playback_end: str
 
 
+@dataclass(frozen=True)
+class StreamRequest:
+    url: str
+    redacted_url: str
+
+
+def stream_url(*, host: str, port: int, username: str, password: str, track: str,
+               path_template: str = "/Streaming/channels/{track}", channel: int | None = None,
+               stream: str = "main") -> StreamRequest:
+    if not track.isdigit() or len(track) > 8:
+        raise ValueError("Invalid RTSP track")
+    if not 1 <= port <= 65535 or any(c in host for c in "/?#@"):
+        raise ValueError("Invalid NVR host or port")
+    path = render_path(path_template, track=track, channel=channel, stream=stream)
+    credentials = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username or password else ""
+    return StreamRequest(f"rtsp://{credentials}{host}:{port}{path}", f"rtsp://***:***@{host}:{port}{path}")
+
+
 def playback_url(*, host: str, port: int, username: str, password: str, track: str,
                  start: str | datetime, end: str | datetime, mode: TimestampMode,
                  nvr_timezone: str, offset_minutes: int = 0, pre_roll: int = 0,
@@ -70,13 +88,11 @@ def playback_url(*, host: str, port: int, username: str, password: str, track: s
     end_utc = min(requested_end, start_utc + timedelta(seconds=max_seconds))
     if end_utc <= start_utc or not track.isdigit() or len(track) > 8:
         raise ValueError("Invalid playback range or track")
-    if not 1 <= port <= 65535 or any(c in host for c in "/?#@"):
-        raise ValueError("Invalid NVR host or port")
     ps = hik_time(start_utc, mode, nvr_timezone, offset_minutes)
     pe = hik_time(end_utc, mode, nvr_timezone, offset_minutes)
-    path = f"{render_path(path_template, track=track, channel=channel, stream=stream)}?starttime={ps}&endtime={pe}"
-    credentials = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username or password else ""
+    base = stream_url(host=host, port=port, username=username, password=password, track=track,
+                      path_template=path_template, channel=channel, stream=stream)
+    query = f"?starttime={ps}&endtime={pe}"
     return PlaybackRequest(
-        f"rtsp://{credentials}{host}:{port}{path}",
-        f"rtsp://***:***@{host}:{port}{path}", start_utc, end_utc, ps, pe,
+        f"{base.url}{query}", f"{base.redacted_url}{query}", start_utc, end_utc, ps, pe,
     )

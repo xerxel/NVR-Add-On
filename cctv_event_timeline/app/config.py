@@ -13,7 +13,8 @@ class Settings:
     data_dir: Path
     nvr_host: str
     rtsp_port: int
-    rtsp_path_template: str
+    live_rtsp_path_template: str
+    playback_rtsp_path_template: str
     nvr_username: str
     nvr_password: str
     nvr_timezone: str
@@ -38,9 +39,11 @@ class Settings:
         data_dir = Path(os.getenv("TIMELINE_DATA", "/data/timeline"))
         tz = raw.get("nvr_timezone", "Europe/London")
         ZoneInfo(tz)
-        path_template = raw.get("rtsp_path_template", "/Streaming/tracks/{track}")
-        render_path(path_template, track="101", channel=1, stream="main")
-        return cls(data_dir, raw.get("nvr_host", "192.168.0.100"), int(raw.get("rtsp_port", 554)), path_template,
+        live_path = raw.get("live_rtsp_path_template", raw.get("rtsp_path_template", "/Streaming/channels/{track}"))
+        playback_path = raw.get("playback_rtsp_path_template", "/Streaming/tracks/{track}")
+        render_path(live_path, track="101", channel=1, stream="main")
+        render_path(playback_path, track="101", channel=1, stream="main")
+        return cls(data_dir, raw.get("nvr_host", "192.168.0.100"), int(raw.get("rtsp_port", 554)), live_path, playback_path,
                    raw.get("nvr_username", ""), raw.get("nvr_password", ""), tz,
                    raw.get("timestamp_mode", "utc"), int(raw.get("manual_offset_minutes", 0)),
                    raw.get("rtsp_transport", "tcp"), int(raw.get("pre_roll_seconds", 5)),
@@ -74,7 +77,9 @@ class Settings:
         temp.replace(target)
 
     def safe_summary(self) -> dict:
-        return {"nvr_host": self.nvr_host, "rtsp_port": self.rtsp_port, "rtsp_path_template": self.rtsp_path_template,
+        return {"nvr_host": self.nvr_host, "rtsp_port": self.rtsp_port,
+                "live_rtsp_path_template": self.live_rtsp_path_template,
+                "playback_rtsp_path_template": self.playback_rtsp_path_template,
                 "credentials_configured": bool(self.nvr_username and self.nvr_password),
                 "nvr_timezone": self.nvr_timezone, "timestamp_mode": self.timestamp_mode,
                 "manual_offset_minutes": self.manual_offset_minutes, "rtsp_transport": self.rtsp_transport,

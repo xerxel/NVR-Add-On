@@ -67,7 +67,8 @@ For an ARM64 build, use `ghcr.io/home-assistant/aarch64-base-python:3.13-alpine3
 |---|---:|---|
 | `nvr_host` | `192.168.0.100` | Validated NVR host/IP; diagnostic endpoints cannot override it. |
 | `rtsp_port` | `554` | NVR RTSP TCP port. |
-| `rtsp_path_template` | `/Streaming/tracks/{track}` | RTSP path used for playback. Supports `{track}`, `{channel}`, and `{stream}` placeholders. Do not include the scheme, host, query string, or credentials. |
+| `live_rtsp_path_template` | `/Streaming/channels/{track}` | RTSP path used only by the live probe. Supports `{track}`, `{channel}`, and `{stream}` placeholders. |
+| `playback_rtsp_path_template` | `/Streaming/tracks/{track}` | RTSP path used for historical thumbnails and videos. It must be an NVR playback endpoint that honours `starttime` and `endtime`. |
 | `nvr_username` / `nvr_password` | empty | Dedicated NVR credentials, stored as add-on options. |
 | `nvr_timezone` | `Europe/London` | IANA zone used by `nvr_local`. |
 | `timestamp_mode` | `utc` | `utc`, `nvr_local`, or `manual_offset`. |
@@ -85,7 +86,7 @@ For an ARM64 build, use `ghcr.io/home-assistant/aarch64-base-python:3.13-alpine3
 
 The in-app channel editor has exactly eight slots. Each holds enabled state, display name, NVR channel number, motion entity, camera entity, main/sub track IDs, optional timestamp offset, and the thumbnail stream. New configurations default to `binary_sensor.network_video_recorder_channel_N_motion` and `camera.network_video_recorder_channel_N`, with the appropriate channel number. Use **Diagnostics > Entity discovery** to confirm or replace those IDs. Mappings are atomically stored in `/data/timeline/channels.json`.
 
-If your NVR uses another RTSP layout, change `rtsp_path_template` in the Home Assistant add-on Configuration tab. For example, `/Streaming/tracks/{track}` produces channel 6 track `/Streaming/tracks/601`; `/custom/channel/{channel}/{stream}` can produce `/custom/channel/6/main`. The add-on always appends the bounded Hikvision `starttime` and `endtime` query parameters.
+If your NVR uses another RTSP layout, change the appropriate template in the Home Assistant add-on Configuration tab. For example, `/Streaming/tracks/{track}` produces channel 6 playback track `/Streaming/tracks/601`; `/custom/channel/{channel}/{stream}` can produce `/custom/channel/6/main`. The add-on appends bounded Hikvision `starttime` and `endtime` parameters only to the playback path. A URL under `/Streaming/channels/` normally returns the live feed and ignores historical timestamps, even when those parameters are present.
 
 ## Using the timeline
 

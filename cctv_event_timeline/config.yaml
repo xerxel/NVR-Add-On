@@ -1,5 +1,5 @@
 name: CCTV Event Timeline
-version: 0.1.3
+version: 0.1.4
 slug: cctv_event_timeline
 description: Local Hikvision motion-event timeline and historical playback
 url: https://github.com/xerxel/NVR-Add-On
@@ -19,7 +19,8 @@ auth_api: true
 options:
   nvr_host: 192.168.0.100
   rtsp_port: 554
-  rtsp_path_template: /Streaming/tracks/{track}
+  live_rtsp_path_template: /Streaming/channels/{track}
+  playback_rtsp_path_template: /Streaming/tracks/{track}
   nvr_username: ""
   nvr_password: ""
   nvr_timezone: Europe/London
@@ -39,7 +40,8 @@ options:
 schema:
   nvr_host: str
   rtsp_port: port
-  rtsp_path_template: str
+  live_rtsp_path_template: str
+  playback_rtsp_path_template: str
   nvr_username: str
   nvr_password: password
   nvr_timezone: str
