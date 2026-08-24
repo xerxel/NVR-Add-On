@@ -123,7 +123,7 @@ At 21:53:37 BST on 23 August 2026, Home Assistant stores `2026-08-23T20:53:37Z`.
 
 ## Upgrades, backup, and restore
 
-Before upgrading, take a Home Assistant backup including add-on data. Stop the add-on for a consistent manual copy of `/data/timeline`: `channels.json` contains mappings, `events.db` metadata, and `cache/` regenerable media. Restore the same directory and add-on options, then start the same or newer compatible version. Updates use the add-on store **Update** action; review `CHANGELOG.md`, back up, update, start, and rerun the first three diagnostics.
+Before upgrading, take a Home Assistant backup including add-on data. Stop the add-on for a consistent manual copy of `/data/timeline`: `channels.json` contains mappings, `events.db` metadata, and `cache/` regenerable media. Restore the same directory and add-on options, then start the same or newer compatible version. Updates use the add-on store **Update** action; review the [changelog](cctv_event_timeline/CHANGELOG.md), back up, update, start, and rerun the first three diagnostics.
 
 Database metadata is retained even when cached media is removed. Approximate storage by multiplying average generated clip bitrate by retained clip seconds; H.264 at 2 Mb/s is about 15 MB/minute. Set both retention days and a cache ceiling suitable for Home Assistant storage.
 
