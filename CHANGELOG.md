@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.12 - 2026-08-24
+
+- User-requested historical clips now take priority over background thumbnail
+  recovery instead of waiting behind the thumbnail queue.
+- An active background thumbnail subprocess is stopped safely when a clip is
+  requested, then the same thumbnail resumes after all queued clips finish.
+- Runtime health now reports whether background thumbnails are paused for a
+  historical clip.
+
 ## 0.1.11 - 2026-08-24
 
 - Media subprocess timeouts now escalate from graceful termination to a forced
