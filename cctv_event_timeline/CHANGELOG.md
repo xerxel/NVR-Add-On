@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.15 - 2026-08-24
+
+- Added a Diagnostics storage report with total consumption, file counts, free
+  filesystem space, and a proportional category bar for system files,
+  thumbnails, videos, database files, logs, temporary files, and other data.
+- Added live add-on and whole-system CPU usage bars that update only while the
+  Diagnostics page is open.
+- Expanded the Timeline to use the available screen width and add responsive
+  columns whenever they fit.
+- Reduced thumbnail display height by half without distorting source images.
+
 ## 0.1.14 - 2026-08-24
 
 - H.264 historical recordings now start playing as a fragmented MP4 while the
