@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.16 - 2026-08-24
+
+- Added event-specific **Open in VLC** links that launch without credentials by
+  default and use the operating system's registered RTSP handler.
+- Added optional VLC credentials protected by an authenticated-encryption key
+  stored under `/data` and an encrypted, HttpOnly, SameSite browser cookie.
+- Added a copyable credential-redacted historical RTSP address to event popups.
+- Saving channel mappings now clears and immediately revalidates the main-stream
+  codec for every enabled camera.
+- Colour-coded codec pills now distinguish H.264, H.264+, H.265, H.265+, and
+  detection states, with H.265 shown in dark red.
+
 ## 0.1.15 - 2026-08-24
 
 - Added a Diagnostics storage report with total consumption, file counts, free
