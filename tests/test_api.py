@@ -41,6 +41,7 @@ def test_ingress_relative_assets():
         assert 'id="addon-cpu"' in html and 'id="system-cpu"' in html
         assert 'id="vlc-settings"' in html and 'id="open-vlc"' in html and 'id="rtsp-url"' in html
         assert 'id="proxy-url"' in html and 'id="copy-proxy"' in html
+        assert 'id="pause-thumbnail-refresh"' in html
         script = client.get("/static/app.js").text
         style = client.get("/static/app.css").text
         assert "codec-pill" in script and "stream_url" in script and "generation_details" in script
@@ -61,6 +62,17 @@ def test_runtime_diagnostics_and_log_truncation_are_secret_free():
         truncated = client.delete("/api/diagnostics/runtime/logs")
         assert truncated.status_code == 200
         assert truncated.json() == {"ok": True, "scope": "sanitised_in_memory_log_view"}
+
+
+def test_thumbnail_refresh_can_be_paused_and_resumed():
+    with TestClient(app) as client:
+        paused = client.put("/api/diagnostics/thumbnail-refresh?paused=true")
+        status = client.get("/api/diagnostics/thumbnail-refresh")
+        resumed = client.put("/api/diagnostics/thumbnail-refresh?paused=false")
+
+    assert paused.status_code == 200 and paused.json()["paused"] is True
+    assert status.json()["paused"] is True
+    assert resumed.status_code == 200 and resumed.json()["paused"] is False
 
 
 def test_codec_compare_bypasses_cache_and_compares_live_with_historical(monkeypatch):

@@ -39,6 +39,7 @@ class MediaManager:
         self._codec_locks: dict[int, asyncio.Lock] = {}
         self.background_thumbnails_allowed = asyncio.Event()
         self.background_thumbnails_allowed.set()
+        self._background_thumbnail_user_paused = False
         self._background_thumbnail_process: asyncio.Task | None = None
         self.log = logging.getLogger("timeline.media")
         for abandoned in self.tmp.glob("*.tmp"): abandoned.unlink(missing_ok=True)
@@ -75,6 +76,49 @@ class MediaManager:
             if process.returncode:
                 raise MediaError(redact(stderr.decode(errors="replace")[-1500:], (self.settings.nvr_username, self.settings.nvr_password)))
             return stdout, stderr
+
+    async def _run_to_file(self, args: list[str], output: Path, timeout: int) -> None:
+        """Pump a non-seekable FFmpeg output into a file so fragments are visible immediately."""
+        async with self._activity("media_process", {"executable": Path(args[0]).name,
+                                                     "timeout_seconds": timeout}) as task_id:
+            if self.tracker and task_id:
+                self.tracker.update(task_id, phase="waiting_for_worker")
+            async with self.process_semaphore:
+                if self.tracker and task_id:
+                    self.tracker.update(task_id, phase="running")
+                process = await asyncio.create_subprocess_exec(
+                    *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
+                )
+
+                async def transfer() -> bytes:
+                    stderr_task = asyncio.create_task(process.stderr.read())
+                    first = True
+                    with output.open("wb") as destination:
+                        while chunk := await process.stdout.read(64 * 1024):
+                            destination.write(chunk)
+                            destination.flush()
+                            if first:
+                                self.log.info("FFmpeg emitted first MP4 fragment bytes=%s", len(chunk))
+                                first = False
+                    await process.wait()
+                    return await stderr_task
+
+                operation = asyncio.create_task(transfer())
+                try:
+                    stderr = await asyncio.wait_for(asyncio.shield(operation), timeout)
+                except asyncio.TimeoutError:
+                    await self._stop_process(process, operation)
+                    stderr = operation.result() if operation.done() and not operation.cancelled() else b""
+                    detail = redact(stderr.decode(errors="replace")[-1500:],
+                                    (self.settings.nvr_username, self.settings.nvr_password)).strip()
+                    suffix = f": {detail}" if detail else ""
+                    raise MediaError(f"Media operation timed out after {timeout} seconds{suffix}") from None
+                except asyncio.CancelledError:
+                    await self._stop_process(process, operation)
+                    raise
+                if process.returncode:
+                    raise MediaError(redact(stderr.decode(errors="replace")[-1500:],
+                                            (self.settings.nvr_username, self.settings.nvr_password)))
 
     async def _stop_process(self, process, communicate: asyncio.Task) -> None:
         """Stop a child process without allowing an unresponsive child to hang the caller."""
@@ -191,7 +235,7 @@ class MediaManager:
         """Run a retryable background media process that yields immediately to a user clip."""
         while True:
             if self.tracker and task_id:
-                current_phase = phase if self.background_thumbnails_allowed.is_set() else "paused_for_historical_video"
+                current_phase = phase if self.background_thumbnails_allowed.is_set() else self._thumbnail_pause_phase()
                 self.tracker.update(task_id, phase=current_phase)
             await self.background_thumbnails_allowed.wait()
             if self.tracker and task_id:
@@ -207,7 +251,7 @@ class MediaManager:
                 if self.background_thumbnails_allowed.is_set():
                     raise
                 if self.tracker and task_id:
-                    self.tracker.update(task_id, phase="paused_for_historical_video")
+                    self.tracker.update(task_id, phase=self._thumbnail_pause_phase())
             finally:
                 if self._background_thumbnail_process is operation:
                     self._background_thumbnail_process = None
@@ -219,6 +263,22 @@ class MediaManager:
     def _generation_update(self, event_id: str, details: dict, **changes) -> None:
         details.update(changes)
         self.db.update(event_id, generation_json=json.dumps(details, separators=(",", ":")))
+
+    def _thumbnail_pause_phase(self) -> str:
+        return "paused_by_user" if self._background_thumbnail_user_paused else "paused_for_historical_video"
+
+    def _sync_background_thumbnail_gate(self) -> None:
+        if self._background_thumbnail_user_paused or self.jobs:
+            self.background_thumbnails_allowed.clear()
+        else:
+            self.background_thumbnails_allowed.set()
+
+    def set_background_thumbnail_paused(self, paused: bool) -> None:
+        self._background_thumbnail_user_paused = bool(paused)
+        self._sync_background_thumbnail_gate()
+        if paused and self._background_thumbnail_process and not self._background_thumbnail_process.done():
+            self._background_thumbnail_process.cancel()
+        self.log.info("Background thumbnail refresh %s by user", "paused" if paused else "resumed")
 
     async def clip(self, event_id: str, url: str, duration_seconds: float, *, channel_id: int | None = None,
                    track: str | None = None, request_details: dict | None = None,
@@ -262,13 +322,17 @@ class MediaManager:
                     video_args = ["-c:v", "copy"] if video_codec == "h264" else [
                         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                     ]
-                    await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                                     "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
-                                     "-map", "0:v:0", "-map", "0:a?", *video_args, "-c:a", "aac",
-                                     "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                    await self._run_to_file(
+                                    ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+                                     "-rtsp_transport", self.settings.rtsp_transport,
+                                     "-rw_timeout", "45000000", "-probesize", "2000000",
+                                     "-analyzeduration", "5000000", "-fflags", "+genpts+discardcorrupt",
+                                     "-i", url, "-t", f"{bounded_duration:.3f}",
+                                     "-map", "0:v:0", "-an", "-sn", "-dn", *video_args,
+                                     "-avoid_negative_ts", "make_zero",
+                                     "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
                                      "-frag_duration", "1000000", "-flush_packets", "1",
-                                     "-f", "mp4", "-y", str(temp)],
-                                    operation_timeout)
+                                     "-f", "mp4", "pipe:1"], temp, operation_timeout)
                     if self.tracker and task_id:
                         self.tracker.update(task_id, phase="validating_mp4")
                     self._generation_update(event_id, details, phase="validating_mp4")
@@ -301,19 +365,18 @@ class MediaManager:
                 raise MediaError(detail) from None
         finally:
             temp.unlink(missing_ok=True); self.jobs.pop(event_id, None)
-            if not self.jobs:
-                self.background_thumbnails_allowed.set()
+            self._sync_background_thumbnail_gate()
 
     def enqueue(self, event_id: str, url: str, duration_seconds: float, *, channel_id: int | None = None,
                 track: str | None = None, request_details: dict | None = None):
         if event_id not in self.jobs:
-            self.background_thumbnails_allowed.clear()
-            if self._background_thumbnail_process and not self._background_thumbnail_process.done():
-                self._background_thumbnail_process.cancel()
             task = asyncio.create_task(self.clip(
                 event_id, url, duration_seconds, channel_id=channel_id, track=track, request_details=request_details,
             ), name=f"historical-clip-{event_id}")
             self.jobs[event_id] = task
+            self._sync_background_thumbnail_gate()
+            if self._background_thumbnail_process and not self._background_thumbnail_process.done():
+                self._background_thumbnail_process.cancel()
 
             def completed(job: asyncio.Task) -> None:
                 if job.cancelled():
@@ -376,4 +439,5 @@ class MediaManager:
         return {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
                 "active_jobs": len(self.jobs), "diagnostic_thumbnail_busy": self.diagnostic_thumbnail_semaphore.locked(),
                 "background_thumbnail_busy": self.thumbnail_semaphore.locked(),
-                "background_thumbnail_paused": not self.background_thumbnails_allowed.is_set()}
+                "background_thumbnail_paused": not self.background_thumbnails_allowed.is_set(),
+                "background_thumbnail_user_paused": self._background_thumbnail_user_paused}

@@ -78,19 +78,21 @@ async def test_clip_has_explicit_duration_and_reports_ready(tmp_path):
     ffmpeg_args = []
 
     async def fake_run(args, timeout=None):
-        if args[0] == "ffmpeg":
-            ffmpeg_args.extend(args)
-            Path(args[-1]).write_bytes(b"mock-mp4")
-            return b"", b""
         return json.dumps({"format": {"duration": "15.0"},
                            "streams": [{"codec_type": "video", "codec_name": "h264"}]}).encode(), b""
 
+    async def fake_run_to_file(args, output, timeout):
+        ffmpeg_args.extend(args)
+        output.write_bytes(b"mock-mp4")
+
     manager._run = fake_run
+    manager._run_to_file = fake_run_to_file
     await manager.clip("event_2", "rtsp://hidden", 15)
 
     assert ffmpeg_args[ffmpeg_args.index("-t") + 1] == "15.000"
     assert ffmpeg_args[ffmpeg_args.index("-c:v") + 1] == "copy"
-    assert ffmpeg_args[ffmpeg_args.index("-movflags") + 1] == "frag_keyframe+empty_moov+default_base_moof"
+    assert ffmpeg_args[ffmpeg_args.index("-movflags") + 1] == "+frag_keyframe+empty_moov+default_base_moof"
+    assert "-an" in ffmpeg_args and ffmpeg_args[-1] == "pipe:1"
     assert any(values.get("video_status") == "ready" for _, values in database.updates)
 
 
@@ -205,11 +207,6 @@ async def test_user_clip_preempts_thumbnail_and_thumbnail_resumes_after_clip(tmp
             ImageDraw.Draw(image).rectangle((0, 0, 160, 180), fill="white")
             image.save(target, format="JPEG")
             return b"", b""
-        if args[0] == "ffmpeg":
-            clip_started.set()
-            await release_clip.wait()
-            target.write_bytes(b"mock-mp4")
-            return b"", b""
         if str(target).startswith("rtsp://"):
             return json.dumps({"format": {}, "streams": [
                 {"codec_type": "video", "codec_name": "h264"},
@@ -218,7 +215,13 @@ async def test_user_clip_preempts_thumbnail_and_thumbnail_resumes_after_clip(tmp
             {"codec_type": "video", "codec_name": "h264"},
         ]}).encode(), b""
 
+    async def fake_run_to_file(args, output, timeout):
+        clip_started.set()
+        await release_clip.wait()
+        output.write_bytes(b"mock-mp4")
+
     manager._run = fake_run
+    manager._run_to_file = fake_run_to_file
     thumbnail = asyncio.create_task(manager.thumbnail("thumbnail_event", "rtsp://thumbnail"))
     await thumbnail_started.wait()
 
@@ -298,6 +301,11 @@ async def test_failed_clip_persists_safe_generation_details(tmp_path):
         raise RuntimeError("NVR refused historical playback")
 
     manager._run = fake_run
+
+    async def failed_output(args, output, timeout):
+        raise RuntimeError("NVR refused historical playback")
+
+    manager._run_to_file = failed_output
     await manager.clip("failed_event", "rtsp://secret", 20, request_details={
         "redacted_playback_url": "rtsp://***:***@nvr/recording",
     })
@@ -333,3 +341,17 @@ async def test_cancelled_clip_is_not_left_generating(tmp_path):
     assert event["video_status"] == "failed"
     assert details["phase"] == "cancelled"
     assert "cancelled" in event["video_error"].lower()
+
+
+def test_manual_thumbnail_pause_survives_clip_gate_updates(tmp_path):
+    manager = MediaManager(settings(tmp_path), FakeDatabase())
+
+    manager.set_background_thumbnail_paused(True)
+    assert not manager.background_thumbnails_allowed.is_set()
+    assert manager.health()["background_thumbnail_user_paused"] is True
+
+    manager._sync_background_thumbnail_gate()
+    assert not manager.background_thumbnails_allowed.is_set()
+
+    manager.set_background_thumbnail_paused(False)
+    assert manager.background_thumbnails_allowed.is_set()

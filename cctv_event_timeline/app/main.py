@@ -653,6 +653,20 @@ async def diagnostic_runtime():
             "logs": runtime_logs.snapshot()}
 
 
+@app.get("/api/diagnostics/thumbnail-refresh")
+async def thumbnail_refresh_status():
+    state = media.health()
+    return {"paused": state["background_thumbnail_user_paused"],
+            "active": state["background_thumbnail_busy"]}
+
+
+@app.put("/api/diagnostics/thumbnail-refresh")
+async def set_thumbnail_refresh(paused: bool = Query(...)):
+    media.set_background_thumbnail_paused(paused)
+    return {"paused": paused, "active": media.health()["background_thumbnail_busy"],
+            "note": "The manual pause lasts until resumed or the add-on restarts."}
+
+
 @app.delete("/api/diagnostics/runtime/logs")
 async def truncate_runtime_logs():
     runtime_logs.truncate()
