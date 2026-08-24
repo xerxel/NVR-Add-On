@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.18 - 2026-08-24
+
+- Added a Diagnostics toggle that manually pauses and resumes background
+  thumbnail recovery without discarding its queue.
+- Changed historical-video generation to emit fragmented MP4 through a
+  non-seekable pipe and flush fragments into the cache as they arrive.
+- Removed optional NVR audio from historical clips to avoid malformed or idle
+  Hikvision audio tracks blocking video output.
+- Bounded RTSP probing and reads, and now includes sanitised FFmpeg output when
+  a media operation times out.
+
 ## 0.1.17 - 2026-08-24
 
 - Fixed historical clip tasks that could disappear while leaving an event stuck
