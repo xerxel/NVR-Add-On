@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.20 - 2026-08-24
+
+- Fixed startup thumbnail recovery so events already marked `partial` are
+  retried, newest first, alongside `finalising` events.
+- Historical thumbnail requests now begin at the motion-event start and no
+  longer include video pre-roll.
+- Removed the redundant codec probe from thumbnail extraction, avoiding an
+  additional historical RTSP connection when the codec cache is empty.
+- Two fallback thumbnail candidates are now captured in one FFmpeg session
+  instead of reconnecting to the NVR for each candidate.
+- Added sanitised timing logs for delay, worker queueing, request construction,
+  frame extraction, candidate validation, persistence, and total duration.
+
 ## 0.1.19 - 2026-08-24
 
 - Removed the FFmpeg `rw_timeout` input option because it is unavailable in the
