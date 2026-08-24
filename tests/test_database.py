@@ -93,3 +93,21 @@ def test_restart_recovers_interrupted_clip_and_pending_thumbnail(tmp_path):
     assert restarted.event(event_id)["video_status"] == "failed"
     assert "interrupted" in restarted.event(event_id)["last_error"]
     assert event_id in {row["id"] for row in restarted.pending_thumbnails()}
+
+
+def test_pending_thumbnails_are_newest_first_and_limit_keeps_newest(tmp_path):
+    database = Database(tmp_path / "events.db")
+    event_ids = []
+    for hour in (8, 10, 9):
+        started = f"2026-08-23T{hour:02d}:00:00Z"
+        ended = f"2026-08-23T{hour:02d}:00:10Z"
+        event_id = database.transition(1, "binary_sensor.motion", "off", "on", started, {}, 5, 10, "utc", 0, 5)
+        database.transition(1, "binary_sensor.motion", "on", "off", ended, {}, 5, 10, "utc", 0, 5)
+        event_ids.append(event_id)
+
+    pending = database.pending_thumbnails(limit=2)
+
+    assert [row["id"] for row in pending] == [event_ids[1], event_ids[2]]
+    assert [row["started_at"] for row in pending] == sorted(
+        (row["started_at"] for row in pending), reverse=True,
+    )

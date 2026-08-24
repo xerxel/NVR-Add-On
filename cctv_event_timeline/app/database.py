@@ -133,5 +133,6 @@ class Database:
         with self.session() as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM events WHERE ended_at IS NOT NULL AND status='finalising' "
-                "AND thumbnail_status IN ('pending','partial','failed') ORDER BY started_at DESC LIMIT ?", (limit,)
+                "AND thumbnail_status IN ('pending','partial','failed') "
+                "ORDER BY started_at DESC, id DESC LIMIT ?", (limit,)
             )]
