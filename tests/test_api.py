@@ -35,6 +35,9 @@ def test_ingress_relative_assets():
         html = client.get("/diagnostics").text
         assert 'href="static/app.css"' in html and 'src="static/app.js"' in html
         assert 'id="live-updates"' in html and 'id="truncate-logs"' in html
+        assert 'id="video-failure"' in html and 'id="failure-details"' in html
+        script = client.get("/static/app.js").text
+        assert "codec-pill" in script and "stream_url" in script and "generation_details" in script
 
 
 def test_runtime_diagnostics_and_log_truncation_are_secret_free():

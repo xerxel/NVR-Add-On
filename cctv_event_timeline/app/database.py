@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS events (
  video_name TEXT, video_size INTEGER, video_duration REAL, video_codec TEXT,
  pre_roll INTEGER NOT NULL, post_roll INTEGER NOT NULL, timestamp_mode TEXT NOT NULL,
  applied_offset INTEGER NOT NULL DEFAULT 0, last_error TEXT, retry_count INTEGER NOT NULL DEFAULT 0,
+ video_error TEXT, generation_json TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  UNIQUE(channel_id, started_at)
 );
@@ -26,6 +27,10 @@ CREATE TABLE IF NOT EXISTS open_motion (
 );
 CREATE TABLE IF NOT EXISTS diagnostics (
  name TEXT PRIMARY KEY, result_json TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS camera_codecs (
+ channel_id INTEGER PRIMARY KEY, track TEXT NOT NULL, codec TEXT NOT NULL,
+ codec_label TEXT NOT NULL, probe_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL
 );
 """
 
@@ -41,8 +46,14 @@ class Database:
         self._lock = threading.RLock()
         with self.session() as db:
             db.executescript(SCHEMA)
-            db.execute("UPDATE events SET video_status='failed',last_error=?,updated_at=? WHERE video_status='generating'",
-                       ("Clip generation was interrupted by an add-on restart; retry the clip", now()))
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(events)")}
+            if "video_error" not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN video_error TEXT")
+            if "generation_json" not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN generation_json TEXT")
+            interrupted = "Clip generation was interrupted by an add-on restart; retry the clip"
+            db.execute("UPDATE events SET video_status='failed',video_error=?,last_error=?,updated_at=? "
+                       "WHERE video_status='generating'", (interrupted, interrupted, now()))
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -97,24 +108,31 @@ class Database:
         return None
 
     def list_events(self, start: str, end: str, channel: int | None, status: str | None, limit: int, offset: int):
-        query = "SELECT * FROM events WHERE started_at>=? AND started_at<?"
+        query = ("SELECT events.*,camera_codecs.codec AS source_codec,camera_codecs.codec_label AS source_codec_label "
+                 "FROM events LEFT JOIN camera_codecs ON camera_codecs.channel_id=events.channel_id "
+                 "WHERE events.started_at>=? AND events.started_at<?")
         args: list = [start, end]
         if channel:
-            query += " AND channel_id=?"; args.append(channel)
+            query += " AND events.channel_id=?"; args.append(channel)
         if status:
-            query += " AND status=?"; args.append(status)
-        query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"; args.extend([limit, offset])
+            query += " AND events.status=?"; args.append(status)
+        query += " ORDER BY events.started_at DESC LIMIT ? OFFSET ?"; args.extend([limit, offset])
         with self.session() as db:
             return [dict(x) for x in db.execute(query, args)]
 
     def event(self, event_id: str):
         with self.session() as db:
-            row = db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+            row = db.execute(
+                "SELECT events.*,camera_codecs.codec AS source_codec,camera_codecs.codec_label AS source_codec_label "
+                "FROM events LEFT JOIN camera_codecs ON camera_codecs.channel_id=events.channel_id WHERE events.id=?",
+                (event_id,),
+            ).fetchone()
             return dict(row) if row else None
 
     def update(self, event_id: str, **values):
         allowed = {"status", "thumbnail_status", "thumbnail_name", "thumbnail_source", "video_status",
-                   "video_name", "video_size", "video_duration", "video_codec", "last_error", "retry_count"}
+                   "video_name", "video_size", "video_duration", "video_codec", "last_error", "retry_count",
+                   "video_error", "generation_json"}
         values = {k: v for k, v in values.items() if k in allowed}
         values["updated_at"] = now()
         with self.session() as db:
@@ -128,6 +146,23 @@ class Database:
         with self.session() as db:
             return [{"name": r["name"], "result": json.loads(r["result_json"]), "updated_at": r["updated_at"]}
                     for r in db.execute("SELECT * FROM diagnostics ORDER BY updated_at DESC")]
+
+    def camera_codec(self, channel_id: int, track: str) -> dict | None:
+        with self.session() as db:
+            row = db.execute("SELECT * FROM camera_codecs WHERE channel_id=? AND track=?", (channel_id, track)).fetchone()
+            return dict(row) if row else None
+
+    def store_camera_codec(self, channel_id: int, track: str, codec: str, codec_label: str, probe: dict) -> None:
+        with self.session() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO camera_codecs(channel_id,track,codec,codec_label,probe_json,updated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (channel_id, track, codec, codec_label, json.dumps(probe, separators=(",", ":")), now()),
+            )
+
+    def clear_camera_codecs(self) -> None:
+        with self.session() as db:
+            db.execute("DELETE FROM camera_codecs")
 
     def pending_thumbnails(self, limit: int = 500):
         with self.session() as db:

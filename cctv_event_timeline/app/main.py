@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -48,8 +49,13 @@ def channel(channel_id: int):
 
 def public_event(row: dict):
     keep = ("id", "channel_id", "started_at", "ended_at", "status", "thumbnail_status", "thumbnail_source",
-            "video_status", "video_size", "video_duration", "video_codec", "last_error", "retry_count")
+            "video_status", "video_size", "video_duration", "video_codec", "video_error", "last_error", "retry_count",
+            "source_codec", "source_codec_label")
     result = {k: row.get(k) for k in keep}
+    try:
+        result["generation_details"] = json.loads(row["generation_json"]) if row.get("generation_json") else None
+    except (TypeError, json.JSONDecodeError):
+        result["generation_details"] = None
     c = channel(row["channel_id"]); result["camera_name"] = c.name if c else f"Camera {row['channel_id']}"
     result["thumbnail_url"] = f"api/events/{row['id']}/thumbnail" if row.get("thumbnail_name") else None
     result["video_url"] = f"api/events/{row['id']}/video" if row.get("video_status") == "ready" else None
@@ -108,7 +114,8 @@ async def final_thumbnail(event_id: str, delay: int = 8):
     if not row: return
     try:
         request = event_playback(row, stream="main")
-        name = await media.thumbnail(event_id, request.url)
+        c = channel(row["channel_id"])
+        name = await media.thumbnail(event_id, request.url, channel_id=row["channel_id"], track=c.main_track if c else None)
         db.update(event_id, thumbnail_status="ready", thumbnail_name=name, thumbnail_source="nvr_historical", status="ready")
     except Exception as exc:
         db.update(event_id, thumbnail_status="partial" if row.get("thumbnail_name") else "failed", status="partial",
@@ -213,6 +220,7 @@ async def config(): return {"settings": settings.safe_summary(), "channels": [c.
 @app.put("/api/channels")
 async def save_channels(body: ChannelList):
     settings.save_channels(body)
+    db.clear_camera_codecs()
     asyncio.create_task(reconcile())
     return {"ok": True, "history_backfill_queued": True, "channels": [c.model_dump() for c in body.channels]}
 
@@ -259,8 +267,33 @@ async def generate(event_id: str):
     except ValueError as exc:
         raise HTTPException(422, redact(exc, (settings.nvr_username, settings.nvr_password))) from None
     duration = (request.end_utc - request.start_utc).total_seconds()
-    media.enqueue(event_id, request.url, duration)
-    return {"status": db.event(event_id)["video_status"] if event_id not in media.jobs else "generating"}
+    c = channel(row["channel_id"])
+    details = {
+        "event_id": event_id, "channel_id": row["channel_id"], "camera_name": c.name if c else None,
+        "track": c.main_track if c else None, "playback_start": request.playback_start,
+        "playback_end": request.playback_end, "redacted_playback_url": request.redacted_url,
+        "pre_roll_seconds": row["pre_roll"], "post_roll_seconds": row["post_roll"],
+        "rtsp_transport": settings.rtsp_transport,
+    }
+    media.enqueue(event_id, request.url, duration, channel_id=row["channel_id"],
+                  track=c.main_track if c else None, request_details=details)
+    return {"status": db.event(event_id)["video_status"] if event_id not in media.jobs else "generating",
+            "stream_url": f"api/events/{event_id}/stream"}
+
+
+@app.get("/api/events/{event_id}/stream")
+async def progressive_video(event_id: str):
+    row = db.event(event_id)
+    if not row:
+        raise HTTPException(404, "Event not found")
+    if row.get("video_status") == "ready" and row.get("video_name"):
+        path = media.videos / (safe_name(Path(row["video_name"]).stem) + ".mp4")
+        if path.is_file():
+            return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
+    if row.get("video_status") != "generating" and event_id not in media.jobs:
+        raise HTTPException(409, row.get("video_error") or "Video is not being generated")
+    return StreamingResponse(media.progressive_clip(event_id), media_type="video/mp4",
+                             headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.delete("/api/events/{event_id}/video")
@@ -413,7 +446,9 @@ async def diag_historical_thumbnail(test: PlaybackTest):
     req = diagnostic_request(test)
     started = time.monotonic()
     try:
-        name = await media.thumbnail(f"diag_nvr_{test.channel_id}", req.url, diagnostic=True)
+        c = channel(test.channel_id)
+        name = await media.thumbnail(f"diag_nvr_{test.channel_id}", req.url, diagnostic=True,
+                                     channel_id=test.channel_id, track=c.main_track if c else None)
         result = {"status": "pass", "duration_ms": round((time.monotonic()-started)*1000),
                   "redacted_url": req.redacted_url, "playback_stream": "main",
                   "image_url": f"api/diagnostics/media/{name}"}
@@ -430,8 +465,10 @@ async def diag_historical_thumbnail(test: PlaybackTest):
 @app.post("/api/diagnostics/historical-video")
 async def diag_historical_video(test: PlaybackTest):
     req = diagnostic_request(test); diagnostic_id = f"diag_video_{test.channel_id}"
+    c = channel(test.channel_id)
     try:
-        await media.clip(diagnostic_id, req.url, test.duration_seconds, raise_errors=True)
+        await media.clip(diagnostic_id, req.url, test.duration_seconds, channel_id=test.channel_id,
+                         track=c.main_track if c else None, raise_errors=True)
     except Exception as exc:
         raise HTTPException(502, redact(exc, (settings.nvr_username, settings.nvr_password))) from None
     path = media.videos / f"{diagnostic_id}.mp4"

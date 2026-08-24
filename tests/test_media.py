@@ -11,9 +11,24 @@ from PIL import Image, ImageDraw
 class FakeDatabase:
     def __init__(self):
         self.updates = []
+        self.codecs = {}
+        self.events = {}
 
     def update(self, event_id, **values):
         self.updates.append((event_id, values))
+        self.events.setdefault(event_id, {}).update(values)
+
+    def event(self, event_id):
+        return self.events.get(event_id)
+
+    def camera_codec(self, channel_id, track):
+        return self.codecs.get((channel_id, track))
+
+    def store_camera_codec(self, channel_id, track, codec, codec_label, probe):
+        self.codecs[(channel_id, track)] = {
+            "channel_id": channel_id, "track": track, "codec": codec, "codec_label": codec_label,
+            "probe_json": json.dumps(probe), "updated_at": "2026-08-24T10:00:00+00:00",
+        }
 
 
 def settings(tmp_path):
@@ -75,6 +90,7 @@ async def test_clip_has_explicit_duration_and_reports_ready(tmp_path):
 
     assert ffmpeg_args[ffmpeg_args.index("-t") + 1] == "15.000"
     assert ffmpeg_args[ffmpeg_args.index("-c:v") + 1] == "copy"
+    assert ffmpeg_args[ffmpeg_args.index("-movflags") + 1] == "frag_keyframe+empty_moov+default_base_moof"
     assert any(values.get("video_status") == "ready" for _, values in database.updates)
 
 
@@ -217,3 +233,79 @@ async def test_user_clip_preempts_thumbnail_and_thumbnail_resumes_after_clip(tmp
     assert manager.background_thumbnails_allowed.is_set()
     assert await asyncio.wait_for(thumbnail, timeout=1) == "thumbnail_event.jpg"
     assert thumbnail_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_camera_codec_is_probed_once_and_cached_with_display_label(tmp_path):
+    database = FakeDatabase()
+    manager = MediaManager(settings(tmp_path), database)
+    calls = 0
+
+    async def fake_run(args, timeout=None):
+        nonlocal calls
+        calls += 1
+        return json.dumps({"format": {}, "streams": [{
+            "codec_type": "video", "codec_name": "h264", "profile": "High",
+        }]}).encode(), b""
+
+    manager._run = fake_run
+    first = await manager.codec_for(1, "101", "rtsp://hidden")
+    second = await manager.codec_for(1, "101", "rtsp://hidden")
+
+    assert calls == 1
+    assert first["codec"] == "h264"
+    assert first["codec_label"] == "H.264"
+    assert second == first
+
+
+def test_codec_label_recognises_hikvision_smart_codec_metadata():
+    assert MediaManager._codec_label({
+        "codec_name": "h264", "tags": {"encoder": "Hikvision SmartCodec H.264+"},
+    }) == "H.264+"
+    assert MediaManager._codec_label({
+        "codec_name": "hevc", "tags": {"encoder": "Hikvision H.265+"},
+    }) == "H.265+"
+
+
+@pytest.mark.asyncio
+async def test_progressive_clip_yields_new_bytes_from_growing_cache_file(tmp_path):
+    database = FakeDatabase()
+    manager = MediaManager(settings(tmp_path), database)
+    database.events["event_stream"] = {"video_status": "generating"}
+    temp = manager.tmp / "event_stream.mp4.tmp"
+    temp.write_bytes(b"first")
+    stream = manager.progressive_clip("event_stream")
+
+    assert await anext(stream) == b"first"
+    with temp.open("ab") as output:
+        output.write(b"second")
+    assert await anext(stream) == b"second"
+    database.events["event_stream"]["video_status"] = "failed"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_failed_clip_persists_safe_generation_details(tmp_path):
+    database = FakeDatabase()
+    manager = MediaManager(settings(tmp_path), database)
+
+    async def fake_run(args, timeout=None):
+        if args[0] == "ffprobe":
+            return json.dumps({"format": {}, "streams": [
+                {"codec_type": "video", "codec_name": "h264"},
+            ]}).encode(), b""
+        raise RuntimeError("NVR refused historical playback")
+
+    manager._run = fake_run
+    await manager.clip("failed_event", "rtsp://secret", 20, request_details={
+        "redacted_playback_url": "rtsp://***:***@nvr/recording",
+    })
+
+    event = database.events["failed_event"]
+    details = json.loads(event["generation_json"])
+    assert event["video_status"] == "failed"
+    assert event["video_error"] == "NVR refused historical playback"
+    assert details["phase"] == "failed"
+    assert details["redacted_playback_url"] == "rtsp://***:***@nvr/recording"
+    assert "secret" not in event["generation_json"]

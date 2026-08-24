@@ -111,3 +111,33 @@ def test_pending_thumbnails_are_newest_first_and_limit_keeps_newest(tmp_path):
     assert [row["started_at"] for row in pending] == sorted(
         (row["started_at"] for row in pending), reverse=True,
     )
+
+
+def test_camera_codec_is_persisted_and_joined_to_events(tmp_path):
+    database = Database(tmp_path / "events.db")
+    event_id = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
+    database.store_camera_codec(1, "101", "h264", "H.264", {"profile": "High"})
+
+    event = database.event(event_id)
+
+    assert event["source_codec"] == "h264"
+    assert event["source_codec_label"] == "H.264"
+    assert database.camera_codec(1, "101")["codec_label"] == "H.264"
+
+
+def test_existing_database_migrates_generation_detail_columns(tmp_path):
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as legacy:
+        legacy.execute("""CREATE TABLE events (
+            id TEXT PRIMARY KEY, channel_id INTEGER, motion_entity TEXT, started_at TEXT, ended_at TEXT,
+            status TEXT, context_json TEXT, thumbnail_status TEXT, thumbnail_name TEXT, thumbnail_source TEXT,
+            video_status TEXT, video_name TEXT, video_size INTEGER, video_duration REAL, video_codec TEXT,
+            pre_roll INTEGER, post_roll INTEGER, timestamp_mode TEXT, applied_offset INTEGER,
+            last_error TEXT, retry_count INTEGER, created_at TEXT, updated_at TEXT
+        )""")
+
+    Database(path)
+
+    with sqlite3.connect(path) as migrated:
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(events)")}
+    assert {"video_error", "generation_json"} <= columns
