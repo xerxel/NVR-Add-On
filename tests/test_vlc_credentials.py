@@ -31,7 +31,10 @@ def test_vlc_launch_is_credential_free_by_default_and_uses_encrypted_cookie_when
         authenticated = client.get(f"/api/events/{event_id}/vlc", follow_redirects=False)
         cleared = client.delete("/api/vlc-credentials")
 
-    assert public["redacted_rtsp_url"].startswith("rtsp://***:***@nvr.example.test:554/")
+    assert public["credential_free_rtsp_url"].startswith("rtsp://nvr.example.test:554/")
+    assert public["redacted_rtsp_url"] == public["credential_free_rtsp_url"]
+    assert "*" not in public["credential_free_rtsp_url"]
+    assert "@" not in public["credential_free_rtsp_url"].split("?", 1)[0]
     assert "fixture-user" not in str(public) and "fixture-password" not in str(public)
     assert anonymous.status_code == 302
     assert anonymous.headers["location"].startswith("rtsp://nvr.example.test:554/")

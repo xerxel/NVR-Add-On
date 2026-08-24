@@ -52,6 +52,11 @@ def channel(channel_id: int):
 
 
 def public_event(row: dict):
+    if row.get("video_status") == "generating" and row.get("id") not in media.jobs:
+        detail = "Clip generation stopped without producing a file; retry the clip and check Diagnostics"
+        db.update(row["id"], video_status="failed", video_error=detail, last_error=detail)
+        log.error("Reconciled orphaned historical clip event=%s to failed", row["id"])
+        row = db.event(row["id"]) or row
     keep = ("id", "channel_id", "started_at", "ended_at", "status", "thumbnail_status", "thumbnail_source",
             "video_status", "video_size", "video_duration", "video_codec", "video_error", "last_error", "retry_count",
             "source_codec", "source_codec_label")
@@ -64,8 +69,13 @@ def public_event(row: dict):
     result["thumbnail_url"] = f"api/events/{row['id']}/thumbnail" if row.get("thumbnail_name") else None
     result["video_url"] = f"api/events/{row['id']}/video" if row.get("video_status") == "ready" else None
     try:
-        result["redacted_rtsp_url"] = event_playback(row).redacted_url
+        credential_free_url = event_playback(row, credentials=("", "")).url
+        result["credential_free_rtsp_url"] = credential_free_url
+        # Retain the old field for clients while making it useful and safe: no
+        # user-info is present, rather than replacing it with invalid asterisks.
+        result["redacted_rtsp_url"] = credential_free_url
     except ValueError:
+        result["credential_free_rtsp_url"] = None
         result["redacted_rtsp_url"] = None
     return result
 
@@ -183,7 +193,9 @@ async def refresh_camera_codecs():
                     password=settings.nvr_password, track=item.main_track,
                     path_template=settings.live_rtsp_path_template, channel=item.nvr_channel, stream="main",
                 )
-                await media.codec_for(item.id, item.main_track, request.url)
+                detected = await media.codec_for(item.id, item.main_track, request.url)
+                log.info("Codec validation channel=%s track=%s codec=%s", item.id, item.main_track,
+                         detected.get("codec_label") or detected.get("codec"))
             except Exception as exc:
                 log.warning("Codec validation failed for channel %s: %s", item.id,
                             redact(exc, (settings.nvr_username, settings.nvr_password)))
@@ -350,6 +362,8 @@ async def generate(event_id: str):
     }
     media.enqueue(event_id, request.url, duration, channel_id=row["channel_id"],
                   track=c.main_track if c else None, request_details=details)
+    log.info("Historical clip requested event=%s channel=%s duration=%.3fs",
+             event_id, row["channel_id"], duration)
     return {"status": db.event(event_id)["video_status"] if event_id not in media.jobs else "generating",
             "stream_url": f"api/events/{event_id}/stream"}
 
@@ -366,7 +380,9 @@ async def progressive_video(event_id: str):
     if row.get("video_status") != "generating" and event_id not in media.jobs:
         raise HTTPException(409, row.get("video_error") or "Video is not being generated")
     return StreamingResponse(media.progressive_clip(event_id), media_type="video/mp4",
-                             headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+                             headers={"Cache-Control": "private, no-store, no-transform",
+                                      "X-Content-Type-Options": "nosniff", "X-Accel-Buffering": "no",
+                                      "Content-Encoding": "identity"})
 
 
 @app.delete("/api/events/{event_id}/video")
@@ -456,6 +472,53 @@ async def diag_probe(test: PlaybackTest):
                      path_template=settings.live_rtsp_path_template,
                      channel=c.nvr_channel, stream=test.stream)
     result = {"status": "pass", "probe": await media.probe(req.url), "url": req.redacted_url}; db.store_diagnostic("probe", result); return result
+
+
+async def codec_probe_result(url: str) -> dict:
+    started = time.monotonic()
+    try:
+        probe = await media.probe(url)
+        stream = next((item for item in probe.get("streams", []) if item.get("codec_type") == "video"), {})
+        return {
+            "status": "pass", "codec": (stream.get("codec_name") or "unknown").lower(),
+            "codec_label": media._codec_label(stream), "profile": stream.get("profile"),
+            "width": stream.get("width"), "height": stream.get("height"),
+            "frame_rate": stream.get("r_frame_rate"),
+            "duration_ms": round((time.monotonic() - started) * 1000),
+        }
+    except Exception as exc:
+        return {"status": "fail", "error": redact(exc, (settings.nvr_username, settings.nvr_password)),
+                "duration_ms": round((time.monotonic() - started) * 1000)}
+
+
+@app.post("/api/diagnostics/codec-compare")
+async def diag_codec_compare(test: PlaybackTest):
+    """Probe live main and a historical main-track window without using the codec cache."""
+    c = channel(test.channel_id)
+    if not c:
+        raise HTTPException(404, "Channel not found")
+    live = stream_url(host=settings.nvr_host, port=settings.rtsp_port,
+                      username=settings.nvr_username, password=settings.nvr_password,
+                      track=c.main_track, path_template=settings.live_rtsp_path_template,
+                      channel=c.nvr_channel, stream="main")
+    historical = diagnostic_request(test)
+    live_result = await codec_probe_result(live.url)
+    historical_result = await codec_probe_result(historical.url)
+    if live_result["status"] == "pass":
+        db.store_camera_codec(c.id, c.main_track, live_result["codec"], live_result["codec_label"], live_result)
+    result = {
+        "status": "pass" if live_result["status"] == historical_result["status"] == "pass" else "fail",
+        "camera": c.name, "channel_id": c.id, "nvr_channel": c.nvr_channel, "main_track": c.main_track,
+        "live_main": live_result, "historical_main": historical_result,
+        "same_codec": live_result.get("codec") == historical_result.get("codec")
+                      if live_result["status"] == historical_result["status"] == "pass" else None,
+        "note": "Live and historical recordings can legitimately differ after an NVR codec setting changes.",
+    }
+    db.store_diagnostic(f"codec_compare_channel_{c.id}", result)
+    log.info("Codec comparison channel=%s live=%s historical=%s", c.id,
+             live_result.get("codec_label", live_result["status"]),
+             historical_result.get("codec_label", historical_result["status"]))
+    return result
 
 
 @app.post("/api/diagnostics/motion-history")

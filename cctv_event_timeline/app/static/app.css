@@ -6,9 +6,10 @@ header{position:sticky;top:0;z-index:3;background:var(--card);border-bottom:1px 
 header>div{display:flex;align-items:center;gap:12px}
 h1{font-size:1.25rem;margin:0}
 nav,.toolbar,.diag-actions{display:flex;gap:8px;flex-wrap:wrap}
-button,select,input{border:1px solid var(--border);background:var(--card);color:var(--text);padding:9px 12px;border-radius:8px}
-button{cursor:pointer}
-button:hover,button:focus-visible{border-color:var(--accent);outline:2px solid transparent}
+button,.button,select,input{border:1px solid var(--border);background:var(--card);color:var(--text);padding:9px 12px;border-radius:8px}
+button,.button{cursor:pointer}
+.button{text-decoration:none;display:inline-flex;align-items:center}
+button:hover,button:focus-visible,.button:hover,.button:focus-visible{border-color:var(--accent);outline:2px solid transparent}
 .pill{font-size:.75rem;padding:4px 8px;border-radius:99px;background:var(--border)}
 .pill.ok{background:#147d4b;color:#fff}
 main{width:100%;margin:auto;padding:24px max(16px,3vw)}

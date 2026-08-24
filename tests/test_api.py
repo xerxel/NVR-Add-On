@@ -40,11 +40,13 @@ def test_ingress_relative_assets():
         assert 'id="resource-usage"' in html and 'id="storage-bar"' in html
         assert 'id="addon-cpu"' in html and 'id="system-cpu"' in html
         assert 'id="vlc-settings"' in html and 'id="open-vlc"' in html and 'id="rtsp-url"' in html
+        assert 'id="proxy-url"' in html and 'id="copy-proxy"' in html
         script = client.get("/static/app.js").text
         style = client.get("/static/app.css").text
         assert "codec-pill" in script and "stream_url" in script and "generation_details" in script
         assert "api/diagnostics/storage" in script and "api/diagnostics/cpu" in script
-        assert "api/vlc-credentials" in script and "api/events/${currentEvent.id}/vlc" in script
+        assert "api/vlc-credentials" in script and "credential_free_rtsp_url" in script
+        assert "Direct VLC handoff requested" in script and "codec-compare" in html
         assert "'H.265':'h265'" in script and ".codec-pill.h265{background:#7b1f2b}" in style
         assert "grid-template-columns:repeat(auto-fill,minmax(250px,1fr))" in style
         assert "aspect-ratio:32/9" in style and "object-fit:cover" in style
@@ -59,6 +61,25 @@ def test_runtime_diagnostics_and_log_truncation_are_secret_free():
         truncated = client.delete("/api/diagnostics/runtime/logs")
         assert truncated.status_code == 200
         assert truncated.json() == {"ok": True, "scope": "sanitised_in_memory_log_view"}
+
+
+def test_codec_compare_bypasses_cache_and_compares_live_with_historical(monkeypatch):
+    async def fake_probe(url):
+        codec = "h264" if "/Streaming/channels/" in url else "hevc"
+        return {"streams": [{"codec_type": "video", "codec_name": codec, "profile": "Main",
+                              "width": 1920, "height": 1080, "r_frame_rate": "25/1"}]}
+
+    monkeypatch.setattr(main.media, "probe", fake_probe)
+    body = {"channel_id": 7, "start": "2026-08-24T12:34:00Z", "duration_seconds": 15,
+            "mode": "utc", "stream": "main"}
+    with TestClient(app) as client:
+        response = client.post("/api/diagnostics/codec-compare", json=body)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["live_main"]["codec_label"] == "H.264"
+    assert result["historical_main"]["codec_label"] == "H.265"
+    assert result["same_codec"] is False
 
 
 def test_storage_and_cpu_diagnostics_are_bounded_and_path_free():

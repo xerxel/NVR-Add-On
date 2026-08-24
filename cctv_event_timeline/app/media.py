@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import math
 import os
 import shutil
@@ -39,6 +40,7 @@ class MediaManager:
         self.background_thumbnails_allowed = asyncio.Event()
         self.background_thumbnails_allowed.set()
         self._background_thumbnail_process: asyncio.Task | None = None
+        self.log = logging.getLogger("timeline.media")
         for abandoned in self.tmp.glob("*.tmp"): abandoned.unlink(missing_ok=True)
 
     @asynccontextmanager
@@ -228,6 +230,8 @@ class MediaManager:
         details.update({"requested_duration_seconds": round(bounded_duration, 3), "phase": "queued"})
         self.db.update(event_id, video_status="generating", video_error=None, last_error=None,
                        generation_json=json.dumps(details, separators=(",", ":")))
+        self.log.info("Historical clip started event=%s channel=%s duration=%.3fs",
+                      event_id, channel_id, bounded_duration)
         try:
             async with self._activity("historical_video", {"event_id": event_id,
                                                             "requested_duration_seconds": bounded_duration}) as task_id:
@@ -253,13 +257,17 @@ class MediaManager:
                     self._generation_update(event_id, details, phase="generating_mp4", source_codec=video_codec,
                                             source_codec_label=codec_label, generation_mode=generation_mode,
                                             timeout_seconds=operation_timeout)
+                    self.log.info("Historical clip encoding event=%s codec=%s mode=%s timeout=%ss",
+                                  event_id, codec_label or video_codec, generation_mode, operation_timeout)
                     video_args = ["-c:v", "copy"] if video_codec == "h264" else [
                         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                     ]
                     await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
                                      "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
                                      "-map", "0:v:0", "-map", "0:a?", *video_args, "-c:a", "aac",
-                                     "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "-y", str(temp)],
+                                     "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                                     "-frag_duration", "1000000", "-flush_packets", "1",
+                                     "-f", "mp4", "-y", str(temp)],
                                     operation_timeout)
                     if self.tracker and task_id:
                         self.tracker.update(task_id, phase="validating_mp4")
@@ -275,10 +283,20 @@ class MediaManager:
             self._generation_update(event_id, details, phase="ready", completed_at=self._utc_now(),
                                     output_duration_seconds=duration, output_size_bytes=final.stat().st_size,
                                     output_codec=codec)
+            self.log.info("Historical clip ready event=%s duration=%.3fs bytes=%s codec=%s",
+                          event_id, duration, final.stat().st_size, codec)
+        except asyncio.CancelledError:
+            detail = "Clip generation was cancelled before completion; retry the clip"
+            self._generation_update(event_id, details, phase="cancelled", failed_at=self._utc_now(), error=detail)
+            self.db.update(event_id, video_status="failed", video_error=detail, last_error=detail)
+            self.log.warning("Historical clip cancelled event=%s phase=%s", event_id, details.get("phase"))
+            raise
         except Exception as exc:
             detail = redact(exc, (self.settings.nvr_username, self.settings.nvr_password))
             self._generation_update(event_id, details, phase="failed", failed_at=self._utc_now(), error=detail)
             self.db.update(event_id, video_status="failed", video_error=detail, last_error=detail)
+            self.log.error("Historical clip failed event=%s phase=%s error=%s",
+                           event_id, details.get("phase"), detail)
             if raise_errors:
                 raise MediaError(detail) from None
         finally:
@@ -292,30 +310,51 @@ class MediaManager:
             self.background_thumbnails_allowed.clear()
             if self._background_thumbnail_process and not self._background_thumbnail_process.done():
                 self._background_thumbnail_process.cancel()
-            self.jobs[event_id] = asyncio.create_task(self.clip(
+            task = asyncio.create_task(self.clip(
                 event_id, url, duration_seconds, channel_id=channel_id, track=track, request_details=request_details,
-            ))
+            ), name=f"historical-clip-{event_id}")
+            self.jobs[event_id] = task
+
+            def completed(job: asyncio.Task) -> None:
+                if job.cancelled():
+                    self.log.warning("Historical clip task ended cancelled event=%s", event_id)
+                    return
+                error = job.exception()
+                if error:
+                    self.log.error("Historical clip task ended with exception event=%s error=%s",
+                                   event_id, redact(error, (self.settings.nvr_username, self.settings.nvr_password)))
+
+            task.add_done_callback(completed)
 
     async def progressive_clip(self, event_id: str):
         """Yield a growing fragmented MP4 while its independent cache job runs."""
         name = safe_name(event_id) + ".mp4"
         final, temp = self.videos / name, self.tmp / (name + ".tmp")
         offset = 0
-        while True:
-            path = final if final.is_file() else temp
-            chunk = b""
-            if path.is_file():
-                with path.open("rb") as stream:
-                    stream.seek(offset)
-                    chunk = stream.read(256 * 1024)
-                if chunk:
-                    offset += len(chunk)
-                    yield chunk
-                    continue
-            row = self.db.event(event_id)
-            if not row or row.get("video_status") in {"ready", "failed", "uncached"}:
-                break
-            await asyncio.sleep(0.1)
+        self.log.info("Progressive clip client connected event=%s", event_id)
+        try:
+            while True:
+                path = final if final.is_file() else temp
+                chunk = b""
+                if path.is_file():
+                    with path.open("rb") as stream:
+                        stream.seek(offset)
+                        chunk = stream.read(256 * 1024)
+                    if chunk:
+                        if offset == 0:
+                            self.log.info("Progressive clip first bytes event=%s bytes=%s", event_id, len(chunk))
+                        offset += len(chunk)
+                        yield chunk
+                        continue
+                row = self.db.event(event_id)
+                if not row or row.get("video_status") in {"ready", "failed", "uncached"}:
+                    break
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            self.log.info("Progressive clip client disconnected event=%s bytes_sent=%s", event_id, offset)
+            raise
+        finally:
+            self.log.info("Progressive clip ended event=%s bytes_sent=%s", event_id, offset)
 
     def delete_clip(self, event: dict):
         if event.get("video_name"): (self.videos / safe_name(Path(event["video_name"]).stem)).with_suffix(".mp4").unlink(missing_ok=True)

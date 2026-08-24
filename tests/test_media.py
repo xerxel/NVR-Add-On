@@ -309,3 +309,27 @@ async def test_failed_clip_persists_safe_generation_details(tmp_path):
     assert details["phase"] == "failed"
     assert details["redacted_playback_url"] == "rtsp://***:***@nvr/recording"
     assert "secret" not in event["generation_json"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_clip_is_not_left_generating(tmp_path):
+    database = FakeDatabase()
+    manager = MediaManager(settings(tmp_path), database)
+    entered = asyncio.Event()
+
+    async def blocked_run(args, timeout=None):
+        entered.set()
+        await asyncio.Future()
+
+    manager._run = blocked_run
+    task = asyncio.create_task(manager.clip("cancelled_event", "rtsp://hidden", 20))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    event = database.events["cancelled_event"]
+    details = json.loads(event["generation_json"])
+    assert event["video_status"] == "failed"
+    assert details["phase"] == "cancelled"
+    assert "cancelled" in event["video_error"].lower()

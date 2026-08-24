@@ -41,3 +41,8 @@ def test_runtime_log_buffer_ignores_its_own_polling_requests():
                                '127.0.0.1 - "GET /api/diagnostics/runtime HTTP/1.1" 200', (), None)
     buffer.emit(record)
     assert buffer.snapshot() == []
+
+    event_poll = logger.makeRecord(logger.name, logging.INFO, __file__, 1,
+                                   '127.0.0.1 - "GET /api/events/698b66d5-a0f0-55bd-9ad9-37f217b14eca HTTP/1.1" 200', (), None)
+    buffer.emit(event_poll)
+    assert buffer.snapshot() == []
