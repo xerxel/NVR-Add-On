@@ -80,7 +80,7 @@ def public_event(row: dict):
     return result
 
 
-def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None,
+def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None, pre_roll=None,
                    credentials: tuple[str, str] | None = None):
     c = channel(row["channel_id"])
     if not c: raise ValueError("Channel mapping no longer exists")
@@ -97,7 +97,8 @@ def event_playback(row: dict, stream="main", mode=None, offset=None, duration=No
                         password=password, track=c.main_track if stream == "main" else c.sub_track,
                         start=row["started_at"], end=end, mode=TimestampMode(mode or row["timestamp_mode"]),
                         nvr_timezone=settings.nvr_timezone, offset_minutes=offset if offset is not None else row["applied_offset"],
-                        pre_roll=row["pre_roll"], post_roll=row["post_roll"], max_seconds=settings.max_clip_seconds,
+                        pre_roll=row["pre_roll"] if pre_roll is None else pre_roll,
+                        post_roll=row["post_roll"], max_seconds=settings.max_clip_seconds,
                         path_template=settings.playback_rtsp_path_template, channel=c.nvr_channel, stream=stream)
 
 
@@ -129,17 +130,29 @@ async def quick_snapshot(event_id: str, entity: str):
 
 
 async def final_thumbnail(event_id: str, delay: int = 8):
+    started = time.monotonic()
+    log.info("Historical thumbnail queued event=%s delay_seconds=%s", event_id, delay)
     await asyncio.sleep(delay)
+    log.info("Historical thumbnail delay complete event=%s delay_ms=%s", event_id,
+             round((time.monotonic() - started) * 1000))
     row = db.event(event_id)
     if not row: return
     try:
-        request = event_playback(row, stream="main")
+        request_started = time.monotonic()
+        request = event_playback(row, stream="main", pre_roll=0)
         c = channel(row["channel_id"])
+        log.info("Historical thumbnail request built event=%s channel=%s request_ms=%s pre_roll_seconds=0",
+                 event_id, row["channel_id"], round((time.monotonic() - request_started) * 1000))
         name = await media.thumbnail(event_id, request.url, channel_id=row["channel_id"], track=c.main_track if c else None)
         db.update(event_id, thumbnail_status="ready", thumbnail_name=name, thumbnail_source="nvr_historical", status="ready")
+        log.info("Historical thumbnail persisted event=%s total_ms=%s", event_id,
+                 round((time.monotonic() - started) * 1000))
     except Exception as exc:
         db.update(event_id, thumbnail_status="partial" if row.get("thumbnail_name") else "failed", status="partial",
                   last_error=redact(exc, (settings.nvr_username, settings.nvr_password)))
+        log.error("Historical thumbnail finalisation failed event=%s total_ms=%s error=%s", event_id,
+                  round((time.monotonic() - started) * 1000),
+                  redact(exc, (settings.nvr_username, settings.nvr_password)))
 
 
 async def recover_pending_thumbnails():

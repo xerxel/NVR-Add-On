@@ -140,6 +140,18 @@ def test_corrupt_event_range_gets_bounded_playback_fallback():
     assert (request.end_utc - request.start_utc).total_seconds() == 45
 
 
+def test_thumbnail_playback_can_omit_event_pre_roll():
+    row = {"id": "thumbnail-no-preroll", "channel_id": 1,
+           "started_at": "2026-08-23T10:00:00+00:00", "ended_at": "2026-08-23T10:00:20+00:00",
+           "timestamp_mode": "utc", "applied_offset": 0, "pre_roll": 5, "post_roll": 10}
+
+    normal = event_playback(row)
+    thumbnail = event_playback(row, pre_roll=0)
+
+    assert normal.playback_start == "20260823T095955Z"
+    assert thumbnail.playback_start == "20260823T100000Z"
+
+
 async def no_background_work():
     return None
 

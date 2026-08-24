@@ -113,6 +113,17 @@ def test_pending_thumbnails_are_newest_first_and_limit_keeps_newest(tmp_path):
     )
 
 
+def test_partial_event_with_failed_thumbnail_is_recovered_on_startup(tmp_path):
+    database = Database(tmp_path / "events.db")
+    event_id = database.transition(1, "binary_sensor.motion", "off", "on",
+                                   "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
+    database.transition(1, "binary_sensor.motion", "on", "off",
+                        "2026-08-23T10:00:10Z", {}, 5, 10, "utc", 0, 5)
+    database.update(event_id, status="partial", thumbnail_status="failed")
+
+    assert event_id in {row["id"] for row in database.pending_thumbnails()}
+
+
 def test_camera_codec_is_persisted_and_joined_to_events(tmp_path):
     database = Database(tmp_path / "events.db")
     event_id = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)

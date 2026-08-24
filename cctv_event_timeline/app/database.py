@@ -167,7 +167,7 @@ class Database:
     def pending_thumbnails(self, limit: int = 500):
         with self.session() as db:
             return [dict(row) for row in db.execute(
-                "SELECT * FROM events WHERE ended_at IS NOT NULL AND status='finalising' "
+                "SELECT * FROM events WHERE ended_at IS NOT NULL AND status IN ('finalising','partial') "
                 "AND thumbnail_status IN ('pending','partial','failed') "
                 "ORDER BY started_at DESC, id DESC LIMIT ?", (limit,)
             )]

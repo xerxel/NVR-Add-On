@@ -46,29 +46,31 @@ def settings(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_thumbnail_retries_uniform_first_frame(tmp_path):
+async def test_thumbnail_extracts_two_candidates_in_one_connection_and_skips_uniform_first(tmp_path, caplog):
     manager = MediaManager(settings(tmp_path), FakeDatabase())
     calls = []
+    caplog.set_level("INFO", logger="timeline.media")
 
     async def fake_run(args, timeout=None):
         calls.append(args)
-        target = Path(args[-1])
-        if len(calls) == 1:
-            Image.new("RGB", (320, 180), "gray").save(target, format="JPEG")
-        else:
-            image = Image.new("RGB", (320, 180), "black")
-            draw = ImageDraw.Draw(image)
-            draw.rectangle((0, 0, 160, 180), fill="white")
-            image.save(target, format="JPEG")
+        pattern = str(args[-1])
+        Image.new("RGB", (320, 180), "gray").save(Path(pattern.replace("%02d", "01")), format="JPEG")
+        image = Image.new("RGB", (320, 180), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 160, 180), fill="white")
+        image.save(Path(pattern.replace("%02d", "02")), format="JPEG")
         return b"", b""
 
     manager._run = fake_run
     name = await manager.thumbnail("event_1", "rtsp://hidden")
 
     assert name == "event_1.jpg"
-    assert len(calls) == 2
-    assert calls[0][calls[0].index("-ss") + 1] == "2"
-    assert calls[1][calls[1].index("-ss") + 1] == "4"
+    assert len(calls) == 1
+    assert calls[0][calls[0].index("-vf") + 1].startswith("fps=1/2,")
+    assert calls[0][calls[0].index("-frames:v") + 1] == "2"
+    assert not manager.db.codecs
+    assert "queue_ms=" in caplog.text and "extraction_ms=" in caplog.text
+    assert "validation_ms=" in caplog.text and "total_ms=" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -104,7 +106,7 @@ async def test_diagnostic_thumbnail_does_not_wait_for_background_queue(tmp_path)
     async def fake_run(args, timeout=None):
         image = Image.new("RGB", (320, 180), "black")
         ImageDraw.Draw(image).rectangle((0, 0, 160, 180), fill="white")
-        image.save(Path(args[-1]), format="JPEG")
+        image.save(Path(str(args[-1]).replace("%02d", "01")), format="JPEG")
         return b"", b""
 
     manager._run = fake_run
@@ -206,7 +208,7 @@ async def test_user_clip_preempts_thumbnail_and_thumbnail_resumes_after_clip(tmp
                     raise
             image = Image.new("RGB", (320, 180), "black")
             ImageDraw.Draw(image).rectangle((0, 0, 160, 180), fill="white")
-            image.save(target, format="JPEG")
+            image.save(Path(str(target).replace("%02d", "01")), format="JPEG")
             return b"", b""
         if str(target).startswith("rtsp://"):
             return json.dumps({"format": {}, "streams": [

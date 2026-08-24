@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import signal
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -198,37 +199,70 @@ class MediaManager:
 
     async def thumbnail(self, event_id: str, url: str, *, diagnostic: bool = False,
                         channel_id: int | None = None, track: str | None = None) -> str:
-        name = safe_name(event_id) + ".jpg"; final = self.thumbs / name; temp = self.tmp / (name + ".tmp")
+        name = safe_name(event_id) + ".jpg"; final = self.thumbs / name
+        candidate_pattern = self.tmp / (name + ".candidate-%02d.jpg")
         operation = "diagnostic_thumbnail" if diagnostic else "background_thumbnail"
+        started = time.monotonic()
+        self.log.info("Historical thumbnail started event=%s channel=%s diagnostic=%s",
+                      event_id, channel_id, diagnostic)
         async with self._activity(operation, {"event_id": event_id}) as task_id:
             try:
                 semaphore = self.diagnostic_thumbnail_semaphore if diagnostic else self.thumbnail_semaphore
                 if self.tracker and task_id:
                     self.tracker.update(task_id, phase="waiting_for_worker")
+                waiting = time.monotonic()
                 async with semaphore:
-                    if channel_id is not None and track:
-                        await self.codec_for(channel_id, track, url, background=not diagnostic, task_id=task_id)
-                    for offset in (2, 4):
-                        args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                                "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
-                                "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)]
-                        if diagnostic:
-                            if self.tracker and task_id:
-                                self.tracker.update(task_id, phase="extracting_frame")
-                            await self._run(args, min(30, self.settings.ffmpeg_timeout_seconds))
-                        else:
-                            await self._run_background_operation(
-                                args, min(30, self.settings.ffmpeg_timeout_seconds), task_id, "extracting_frame",
-                            )
-                        with Image.open(temp) as image:
+                    queue_ms = round((time.monotonic() - waiting) * 1000)
+                    self.log.info("Historical thumbnail worker acquired event=%s queue_ms=%s", event_id, queue_ms)
+                    # Thumbnail extraction does not need a codec probe. Avoiding it saves a second RTSP
+                    # connection when the per-camera display codec cache is empty.
+                    args = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                            "-rtsp_transport", self.settings.rtsp_transport, "-i", url, "-an",
+                            "-vf", "fps=1/2,scale='min(960,iw)':-2", "-frames:v", "2",
+                            "-f", "image2", "-y", str(candidate_pattern)]
+                    if self.tracker and task_id:
+                        self.tracker.update(task_id, phase="extracting_frames")
+                    extraction_started = time.monotonic()
+                    if diagnostic:
+                        await self._run(args, min(30, self.settings.ffmpeg_timeout_seconds))
+                    else:
+                        await self._run_background_operation(
+                            args, min(30, self.settings.ffmpeg_timeout_seconds), task_id, "extracting_frames",
+                        )
+                    extraction_ms = round((time.monotonic() - extraction_started) * 1000)
+                    candidates = sorted(self.tmp.glob(name + ".candidate-*.jpg"))
+                    self.log.info("Historical thumbnail frames extracted event=%s extraction_ms=%s candidates=%s",
+                                  event_id, extraction_ms, len(candidates))
+                    validation_started = time.monotonic()
+                    for index, candidate in enumerate(candidates, 1):
+                        with Image.open(candidate) as image:
                             image.load()
                             variation = ImageStat.Stat(image.convert("L")).stddev[0]
-                            valid = image.width > 0 and image.height > 0 and temp.stat().st_size <= 10_000_000
-                        if valid and variation >= 3:
-                            temp.replace(final)
+                            width, height = image.size
+                            valid = width > 0 and height > 0 and candidate.stat().st_size <= 10_000_000
+                        accepted = valid and variation >= 3
+                        self.log.info(
+                            "Historical thumbnail candidate checked event=%s candidate=%s size=%sx%s "
+                            "variation=%.2f accepted=%s", event_id, index, width, height, variation, accepted,
+                        )
+                        if accepted:
+                            candidate.replace(final)
+                            validation_ms = round((time.monotonic() - validation_started) * 1000)
+                            self.log.info(
+                                "Historical thumbnail ready event=%s queue_ms=%s extraction_ms=%s "
+                                "validation_ms=%s total_ms=%s", event_id, queue_ms, extraction_ms,
+                                validation_ms, round((time.monotonic() - started) * 1000),
+                            )
                             return name
                 raise MediaError("NVR returned only blank or uniform thumbnail frames")
-            finally: temp.unlink(missing_ok=True)
+            except Exception as exc:
+                self.log.error("Historical thumbnail failed event=%s total_ms=%s error=%s", event_id,
+                               round((time.monotonic() - started) * 1000),
+                               redact(exc, (self.settings.nvr_username, self.settings.nvr_password)))
+                raise
+            finally:
+                for candidate in self.tmp.glob(name + ".candidate-*.jpg"):
+                    candidate.unlink(missing_ok=True)
 
     async def _run_background_operation(self, args: list[str], timeout: int, task_id: str | None,
                                         phase: str) -> tuple[bytes, bytes]:
