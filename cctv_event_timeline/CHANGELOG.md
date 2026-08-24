@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.19 - 2026-08-24
+
+- Removed the FFmpeg `rw_timeout` input option because it is unavailable in the
+  Home Assistant Raspberry Pi FFmpeg build and prevented RTSP inputs opening.
+- Historical media operations remain bounded by the add-on's process timeout.
+- Added a regression check that prevents the unsupported option returning.
+
 ## 0.1.18 - 2026-08-24
 
 - Added a Diagnostics toggle that manually pauses and resumes background
