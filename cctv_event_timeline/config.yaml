@@ -1,5 +1,5 @@
 name: CCTV Event Timeline
-version: "0.1.13"
+version: "0.1.14"
 slug: cctv_event_timeline
 description: Local Hikvision motion-event timeline and historical playback
 url: https://github.com/xerxel/NVR-Add-On

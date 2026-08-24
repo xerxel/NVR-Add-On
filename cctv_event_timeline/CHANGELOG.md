@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.14 - 2026-08-24
+
+- H.264 historical recordings now start playing as a fragmented MP4 while the
+  same request continues to build the cached clip in the background.
+- Camera codec probes are persisted and reused, and timeline thumbnails show a
+  codec badge for H.264, H.264+, H.265, or H.265+ when detectable.
+- Failed historical clips now retain a credential-safe request and processing
+  report in the event popup, including the failed phase and error reason.
+- Clip timeouts now account for the requested recording duration, and
+  user-requested clips continue to pause and resume background thumbnail work.
+
 ## 0.1.13 - 2026-08-24
 
 - Moved the changelog beside the app configuration so Home Assistant can show

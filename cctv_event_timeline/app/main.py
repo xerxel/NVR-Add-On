@@ -178,7 +178,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.13", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.14", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 index_html = (static / "index.html").read_text(encoding="utf-8")
 app.mount("/static", StaticFiles(directory=static), name="static")
@@ -524,7 +524,7 @@ async def truncate_runtime_logs():
 
 
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.13", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.14", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
                             "health": media.health(), "home_assistant_last_connected": ha.last_connected,
                             "runtime": {"tasks": task_tracker.snapshot(), "logs": runtime_logs.snapshot()},
