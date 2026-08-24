@@ -323,10 +323,10 @@ class MediaManager:
                         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                     ]
                     await self._run_to_file(
-                                    ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+                                     ["ffmpeg", "-hide_banner", "-loglevel", "warning",
                                      "-rtsp_transport", self.settings.rtsp_transport,
-                                     "-rw_timeout", "45000000", "-probesize", "2000000",
-                                     "-analyzeduration", "5000000", "-fflags", "+genpts+discardcorrupt",
+                                     "-probesize", "2000000", "-analyzeduration", "5000000",
+                                     "-fflags", "+genpts+discardcorrupt",
                                      "-i", url, "-t", f"{bounded_duration:.3f}",
                                      "-map", "0:v:0", "-an", "-sn", "-dn", *video_args,
                                      "-avoid_negative_ts", "make_zero",

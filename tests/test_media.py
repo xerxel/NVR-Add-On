@@ -93,6 +93,7 @@ async def test_clip_has_explicit_duration_and_reports_ready(tmp_path):
     assert ffmpeg_args[ffmpeg_args.index("-c:v") + 1] == "copy"
     assert ffmpeg_args[ffmpeg_args.index("-movflags") + 1] == "+frag_keyframe+empty_moov+default_base_moof"
     assert "-an" in ffmpeg_args and ffmpeg_args[-1] == "pipe:1"
+    assert "-rw_timeout" not in ffmpeg_args
     assert any(values.get("video_status") == "ready" for _, values in database.updates)
 
 
