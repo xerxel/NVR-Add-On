@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.17 - 2026-08-24
+
+- Fixed historical clip tasks that could disappear while leaving an event stuck
+  in `generating`; cancellations and orphaned jobs now become visible failures.
+- Improved fragmented-MP4 startup flushing and disabled proxy buffering so H.264
+  playback can begin before the complete clip is cached.
+- Changed **Open in VLC** to a direct user-initiated, credential-free RTSP link
+  and now displays a valid URL with the username and password removed.
+- Added a temporary, copyable add-on proxy address for testing progressive MP4
+  playback directly in VLC through the current Home Assistant ingress session.
+- Added browser video lifecycle diagnostics and detailed, sanitised server-side
+  clip logging while filtering repetitive status polls from the diagnostic log.
+- Added a live-versus-historical codec comparison test that bypasses the cache,
+  reports codec/profile/resolution, and refreshes the selected camera's badge.
+
 ## 0.1.16 - 2026-08-24
 
 - Added event-specific **Open in VLC** links that launch without credentials by
