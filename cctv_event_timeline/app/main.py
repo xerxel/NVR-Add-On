@@ -89,7 +89,7 @@ async def final_thumbnail(event_id: str, delay: int = 8):
     row = db.event(event_id)
     if not row: return
     try:
-        request = event_playback(row, stream=channel(row["channel_id"]).thumbnail_stream)
+        request = event_playback(row, stream="main")
         name = await media.thumbnail(event_id, request.url)
         db.update(event_id, thumbnail_status="ready", thumbnail_name=name, thumbnail_source="nvr_historical", status="ready")
     except Exception as exc:
@@ -129,7 +129,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.5", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.6", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 index_html = (static / "index.html").read_text(encoding="utf-8")
 app.mount("/static", StaticFiles(directory=static), name="static")
@@ -284,13 +284,14 @@ async def diag_url(test: PlaybackTest):
     if not c: raise HTTPException(404, "Channel not found")
     end = test.start + timedelta(seconds=test.duration_seconds)
     request = playback_url(host=settings.nvr_host, port=settings.rtsp_port, username=settings.nvr_username, password=settings.nvr_password,
-                           track=c.main_track if test.stream == "main" else c.sub_track, start=test.start, end=end,
+                           track=c.main_track, start=test.start, end=end,
                            mode=TimestampMode(test.mode or settings.timestamp_mode), nvr_timezone=settings.nvr_timezone,
                            offset_minutes=test.offset_minutes if test.offset_minutes is not None else settings.manual_offset_minutes,
                            max_seconds=30, path_template=settings.playback_rtsp_path_template,
-                           channel=c.nvr_channel, stream=test.stream)
+                           channel=c.nvr_channel, stream="main")
     return {"status": "pass", "redacted_url": request.redacted_url, "start_utc": request.start_utc,
-            "end_utc": request.end_utc, "playback_start": request.playback_start, "playback_end": request.playback_end}
+            "end_utc": request.end_utc, "playback_start": request.playback_start,
+            "playback_end": request.playback_end, "playback_stream": "main"}
 
 
 @app.post("/api/diagnostics/live-probe")
@@ -354,12 +355,12 @@ def diagnostic_request(test: PlaybackTest, mode: str | None = None):
     if not c:
         raise HTTPException(404, "Channel not found")
     return playback_url(host=settings.nvr_host, port=settings.rtsp_port, username=settings.nvr_username,
-                        password=settings.nvr_password, track=c.main_track if test.stream == "main" else c.sub_track,
+                        password=settings.nvr_password, track=c.main_track,
                         start=test.start, end=test.start + timedelta(seconds=test.duration_seconds),
                         mode=TimestampMode(mode or test.mode or settings.timestamp_mode), nvr_timezone=settings.nvr_timezone,
                         offset_minutes=test.offset_minutes if test.offset_minutes is not None else settings.manual_offset_minutes,
                         max_seconds=30, path_template=settings.playback_rtsp_path_template,
-                        channel=c.nvr_channel, stream=test.stream)
+                        channel=c.nvr_channel, stream="main")
 
 
 @app.post("/api/diagnostics/historical-thumbnail")
@@ -417,6 +418,6 @@ async def diag_media(name: str):
 
 
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.5", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.6", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
                             "health": media.health(), "home_assistant_last_connected": ha.last_connected, "test_results": db.diagnostics()}

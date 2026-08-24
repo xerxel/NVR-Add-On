@@ -88,6 +88,8 @@ The in-app channel editor has exactly eight slots. Each holds enabled state, dis
 
 If your NVR uses another RTSP layout, change the appropriate template in the Home Assistant add-on Configuration tab. For example, `/Streaming/tracks/{track}` produces channel 6 playback track `/Streaming/tracks/601`; `/custom/channel/{channel}/{stream}` can produce `/custom/channel/6/main`. The add-on appends bounded Hikvision `starttime` and `endtime` parameters only to the playback path. A URL under `/Streaming/channels/` normally returns the live feed and ignores historical timestamps, even when those parameters are present.
 
+Historical playback always uses each channel's **Main playback track** (`101`, `201`, …, `801` by default). The subtrack is retained only for the live probe because some Hikvision NVRs expose recorded playback only on the primary track.
+
 ## Using the timeline
 
 Choose a date and optionally a camera. Previous/next controls navigate days. Cards show local browser time, duration, event status, thumbnail source state, and clip cache state. Select a thumbnail to open the historical player. On first use, **Generate historical clip** queues a bounded job; the UI polls until it can play the cached MP4. **Delete cached clip** permits regeneration.

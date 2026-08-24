@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6 - 2026-08-24
+
+- All historical playback operations now always use the configured main track:
+  event thumbnails, event videos, URL generation, historical diagnostics, and
+  timestamp calibration.
+- The subtrack remains available only for the explicitly labelled live probe.
+
 ## 0.1.5 - 2026-08-24
 
 - Fixed SQLite connections accumulating until the container exhausted its file

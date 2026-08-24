@@ -14,7 +14,7 @@ class Channel(BaseModel):
     main_track: str
     sub_track: str
     timestamp_offset_minutes: int | None = Field(default=None, ge=-1440, le=1440)
-    thumbnail_stream: Literal["main", "sub"] = "sub"
+    thumbnail_stream: Literal["main", "sub"] = "main"
 
     @field_validator("motion_entity")
     @classmethod
@@ -55,7 +55,7 @@ class PlaybackTest(BaseModel):
     duration_seconds: int = Field(default=15, ge=1, le=30)
     mode: Literal["utc", "nvr_local", "manual_offset"] | None = None
     offset_minutes: int | None = Field(default=None, ge=-1440, le=1440)
-    stream: Literal["main", "sub"] = "sub"
+    stream: Literal["main", "sub"] = "main"
 
 
 class HistoryTest(BaseModel):

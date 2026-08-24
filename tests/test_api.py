@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
-from app.main import app, db
+from app.main import app, db, diagnostic_request
+from app.models import PlaybackTest
 from fastapi.testclient import TestClient
 
 
@@ -41,3 +42,16 @@ def test_timeline_date_uses_london_local_day():
     with TestClient(app) as client:
         result = client.get("/api/events", params={"date": "2026-08-24", "channel_id": 8}).json()
     assert event_id in {item["id"] for item in result["items"]}
+
+
+def test_historical_diagnostics_force_main_track_when_sub_requested():
+    test = PlaybackTest(channel_id=1, start=datetime(2026, 8, 22, 7, 23, tzinfo=timezone.utc),
+                        duration_seconds=15, stream="sub")
+    request = diagnostic_request(test)
+    assert "/Streaming/tracks/101?" in request.redacted_url
+    assert "/Streaming/tracks/102?" not in request.redacted_url
+
+    with TestClient(app) as client:
+        result = client.post("/api/diagnostics/playback-url", json=test.model_dump(mode="json")).json()
+    assert "/Streaming/tracks/101?" in result["redacted_url"]
+    assert result["playback_stream"] == "main"
