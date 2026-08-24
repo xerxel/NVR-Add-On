@@ -71,10 +71,16 @@ class MediaManager:
         self.db.update(event_id, video_status="generating", last_error=None)
         try:
             async with self.clip_semaphore:
+                source = await self.probe(url)
+                video_codec = next((stream.get("codec_name") for stream in source["streams"]
+                                    if stream.get("codec_type") == "video"), None)
+                video_args = ["-c:v", "copy"] if video_codec == "h264" else [
+                    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                ]
                 await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
                                  "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
-                                 "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast",
-                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-f", "mp4", "-y", str(temp)])
+                                 "-map", "0:v:0", "-map", "0:a?", *video_args, "-c:a", "aac",
+                                 "-movflags", "+faststart", "-f", "mp4", "-y", str(temp)])
                 out, _ = await self._run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type",
                                           "-of", "json", str(temp)], 20)
             info = json.loads(out); duration = float(info.get("format", {}).get("duration", 0))

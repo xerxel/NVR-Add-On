@@ -74,6 +74,7 @@ async def test_clip_has_explicit_duration_and_reports_ready(tmp_path):
     await manager.clip("event_2", "rtsp://hidden", 15)
 
     assert ffmpeg_args[ffmpeg_args.index("-t") + 1] == "15.000"
+    assert ffmpeg_args[ffmpeg_args.index("-c:v") + 1] == "copy"
     assert any(values.get("video_status") == "ready" for _, values in database.updates)
 
 

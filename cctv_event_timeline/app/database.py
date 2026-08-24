@@ -41,6 +41,8 @@ class Database:
         self._lock = threading.RLock()
         with self.session() as db:
             db.executescript(SCHEMA)
+            db.execute("UPDATE events SET video_status='failed',last_error=?,updated_at=? WHERE video_status='generating'",
+                       ("Clip generation was interrupted by an add-on restart; retry the clip", now()))
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -126,3 +128,10 @@ class Database:
         with self.session() as db:
             return [{"name": r["name"], "result": json.loads(r["result_json"]), "updated_at": r["updated_at"]}
                     for r in db.execute("SELECT * FROM diagnostics ORDER BY updated_at DESC")]
+
+    def pending_thumbnails(self, limit: int = 500):
+        with self.session() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM events WHERE ended_at IS NOT NULL AND status='finalising' "
+                "AND thumbnail_status IN ('pending','partial','failed') ORDER BY started_at DESC LIMIT ?", (limit,)
+            )]

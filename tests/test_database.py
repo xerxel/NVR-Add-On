@@ -79,3 +79,17 @@ def test_clear_before_start_does_not_corrupt_event(tmp_path):
     event_id = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
     assert database.transition(1, "binary_sensor.motion", "on", "off", "2026-08-23T09:59:00Z", {}, 5, 10, "utc", 0, 5) is None
     assert database.event(event_id)["ended_at"] is None
+
+
+def test_restart_recovers_interrupted_clip_and_pending_thumbnail(tmp_path):
+    path = tmp_path / "events.db"
+    database = Database(path)
+    event_id = database.transition(1, "binary_sensor.motion", "off", "on", "2026-08-23T10:00:00Z", {}, 5, 10, "utc", 0, 5)
+    database.transition(1, "binary_sensor.motion", "on", "off", "2026-08-23T10:00:10Z", {}, 5, 10, "utc", 0, 5)
+    database.update(event_id, video_status="generating")
+
+    restarted = Database(path)
+
+    assert restarted.event(event_id)["video_status"] == "failed"
+    assert "interrupted" in restarted.event(event_id)["last_error"]
+    assert event_id in {row["id"] for row in restarted.pending_thumbnails()}

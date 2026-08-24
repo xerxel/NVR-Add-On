@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.9 - 2026-08-24
+
+- Pending historical thumbnails are recovered after restart and processed
+  sequentially instead of remaining permanently in `finalising`.
+- Interrupted `generating` video records are marked failed with a retryable
+  explanation during startup.
+- H.264 main-stream video is remuxed without re-encoding; only incompatible
+  audio is converted to AAC. Non-H.264 video still uses the safe transcode path.
+
 ## 0.1.8 - 2026-08-24
 
 - New channel configurations now enable all eight camera slots by default.

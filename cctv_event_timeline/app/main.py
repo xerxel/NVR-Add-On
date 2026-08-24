@@ -28,6 +28,7 @@ log = logging.getLogger("timeline")
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 stop_event = asyncio.Event()
 reconcile_lock = asyncio.Lock()
+thumbnail_recovery_lock = asyncio.Lock()
 
 
 def channel(channel_id: int):
@@ -103,6 +104,16 @@ async def final_thumbnail(event_id: str, delay: int = 8):
                   last_error=redact(exc, (settings.nvr_username, settings.nvr_password)))
 
 
+async def recover_pending_thumbnails():
+    if thumbnail_recovery_lock.locked():
+        return
+    async with thumbnail_recovery_lock:
+        for row in db.pending_thumbnails():
+            if stop_event.is_set():
+                return
+            await final_thumbnail(row["id"], delay=0)
+
+
 async def reconcile():
     async with reconcile_lock:
         for c in settings.channels():
@@ -114,15 +125,14 @@ async def reconcile():
                 for state in states:
                     value = state.get("state")
                     if value in {"on", "off"}:
-                        event_id = db.transition(c.id, c.motion_entity, previous, value,
-                                                 state.get("last_changed") or state.get("last_updated"), {},
-                                                 settings.pre_roll_seconds, settings.post_roll_seconds, settings.timestamp_mode,
-                                                 c.timestamp_offset_minutes or settings.manual_offset_minutes,
-                                                 settings.merge_gap_seconds)
-                        if event_id and value == "off":
-                            asyncio.create_task(final_thumbnail(event_id, delay=0))
+                        db.transition(c.id, c.motion_entity, previous, value,
+                                      state.get("last_changed") or state.get("last_updated"), {},
+                                      settings.pre_roll_seconds, settings.post_roll_seconds, settings.timestamp_mode,
+                                      c.timestamp_offset_minutes or settings.manual_offset_minutes,
+                                      settings.merge_gap_seconds)
                         previous = value
             except Exception as exc: log.warning("History reconciliation failed for channel %s: %s", c.id, redact(exc))
+        asyncio.create_task(recover_pending_thumbnails())
 
 
 @asynccontextmanager
@@ -136,7 +146,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.8", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.9", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 index_html = (static / "index.html").read_text(encoding="utf-8")
 app.mount("/static", StaticFiles(directory=static), name="static")
@@ -440,6 +450,6 @@ async def diag_media(name: str):
 
 
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.8", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.9", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
                             "health": media.health(), "home_assistant_last_connected": ha.last_connected, "test_results": db.diagnostics()}
