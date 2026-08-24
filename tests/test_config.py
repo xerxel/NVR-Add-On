@@ -14,6 +14,7 @@ def test_default_entity_mappings_and_path_template(tmp_path, monkeypatch):
 
     assert settings.live_rtsp_path_template == "/Streaming/channels/{track}"
     assert settings.playback_rtsp_path_template == "/Streaming/tracks/{track}"
+    assert all(c.enabled for c in channels)
     assert [c.motion_entity for c in channels] == [
         f"binary_sensor.network_video_recorder_channel_{i}_motion" for i in range(1, 9)
     ]

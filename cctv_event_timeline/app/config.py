@@ -63,7 +63,7 @@ class Settings:
         result = []
         for i in range(1, 9):
             main, sub = default_tracks(i)
-            result.append(Channel(id=i, enabled=False, name=f"Camera {i}", nvr_channel=i,
+            result.append(Channel(id=i, enabled=True, name=f"Camera {i}", nvr_channel=i,
                                   motion_entity=f"binary_sensor.network_video_recorder_channel_{i}_motion",
                                   camera_entity=f"camera.network_video_recorder_channel_{i}",
                                   main_track=main, sub_track=sub))

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-08-24
+
+- New channel configurations now enable all eight camera slots by default.
+  Previously saved channel settings remain unchanged during upgrades.
+
 ## 0.1.7 - 2026-08-24
 
 - Historical-thumbnail diagnostics no longer wait behind 4K video encoding or
