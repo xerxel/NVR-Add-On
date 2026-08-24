@@ -36,8 +36,14 @@ def test_ingress_relative_assets():
         assert 'href="static/app.css"' in html and 'src="static/app.js"' in html
         assert 'id="live-updates"' in html and 'id="truncate-logs"' in html
         assert 'id="video-failure"' in html and 'id="failure-details"' in html
+        assert 'id="resource-usage"' in html and 'id="storage-bar"' in html
+        assert 'id="addon-cpu"' in html and 'id="system-cpu"' in html
         script = client.get("/static/app.js").text
+        style = client.get("/static/app.css").text
         assert "codec-pill" in script and "stream_url" in script and "generation_details" in script
+        assert "api/diagnostics/storage" in script and "api/diagnostics/cpu" in script
+        assert "grid-template-columns:repeat(auto-fill,minmax(250px,1fr))" in style
+        assert "aspect-ratio:32/9" in style and "object-fit:cover" in style
 
 
 def test_runtime_diagnostics_and_log_truncation_are_secret_free():
@@ -49,6 +55,23 @@ def test_runtime_diagnostics_and_log_truncation_are_secret_free():
         truncated = client.delete("/api/diagnostics/runtime/logs")
         assert truncated.status_code == 200
         assert truncated.json() == {"ok": True, "scope": "sanitised_in_memory_log_view"}
+
+
+def test_storage_and_cpu_diagnostics_are_bounded_and_path_free():
+    with TestClient(app) as client:
+        storage = client.get("/api/diagnostics/storage")
+        cpu = client.get("/api/diagnostics/cpu")
+
+    assert storage.status_code == 200
+    assert set(storage.json()) == {"generated_at", "total_bytes", "cache_limit_bytes", "categories", "filesystem"}
+    assert {item["key"] for item in storage.json()["categories"]} == {
+        "system", "thumbnails", "videos", "database", "logs", "temporary", "other",
+    }
+    assert "path" not in storage.text.lower()
+    assert cpu.status_code == 200
+    assert 0 <= cpu.json()["addon_percent"] <= 100
+    if cpu.json()["system_percent"] is not None:
+        assert 0 <= cpu.json()["system_percent"] <= 100
 
 
 def test_timeline_date_uses_london_local_day():

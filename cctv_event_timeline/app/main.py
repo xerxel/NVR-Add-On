@@ -20,6 +20,7 @@ from .log_buffer import SanitizedLogBuffer
 from .media import MediaManager
 from .models import ChannelList, HistoryTest, PlaybackTest
 from .security import redact, safe_name
+from .storage import cpu_report, storage_report
 from .task_tracker import TaskTracker
 
 settings = Settings.load()
@@ -523,9 +524,29 @@ async def truncate_runtime_logs():
     return {"ok": True, "scope": "sanitised_in_memory_log_view"}
 
 
+async def current_storage():
+    report = await asyncio.to_thread(
+        storage_report, system_root=Path(__file__).resolve().parents[1], data_root=settings.data_dir,
+        thumbnails=media.thumbs, videos=media.videos, temporary=media.tmp, database=db.path,
+        cache_limit_mb=settings.max_cache_mb,
+    )
+    return {"generated_at": datetime.now(timezone.utc), **report}
+
+
+@app.get("/api/diagnostics/storage")
+async def diagnostic_storage():
+    return await current_storage()
+
+
+@app.get("/api/diagnostics/cpu")
+async def diagnostic_cpu():
+    return {"generated_at": datetime.now(timezone.utc), **await asyncio.to_thread(cpu_report)}
+
+
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.14", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
-                            "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
-                            "health": media.health(), "home_assistant_last_connected": ha.last_connected,
-                            "runtime": {"tasks": task_tracker.snapshot(), "logs": runtime_logs.snapshot()},
-                            "test_results": db.diagnostics()}
+async def report():
+    return {"version": "0.1.14", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+            "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
+            "health": media.health(), "home_assistant_last_connected": ha.last_connected,
+            "runtime": {"tasks": task_tracker.snapshot(), "logs": runtime_logs.snapshot()},
+            "storage": await current_storage(), "cpu": await diagnostic_cpu(), "test_results": db.diagnostics()}
