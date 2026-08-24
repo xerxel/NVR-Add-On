@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11 - 2026-08-24
+
+- Media subprocess timeouts now escalate from graceful termination to a forced
+  kill, preventing unresponsive FFmpeg processes from leaving jobs hung.
+- The configured media concurrency limit now covers thumbnail, video, FFmpeg,
+  and FFprobe operations.
+- Pending thumbnails are processed from the most recent event backwards, with
+  deterministic ordering when event timestamps match.
+
 ## 0.1.10 - 2026-08-24
 
 - Diagnostics now shows all currently running background operations, their
