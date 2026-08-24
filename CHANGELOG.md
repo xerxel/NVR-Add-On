@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.10 - 2026-08-24
+
+- Diagnostics now shows all currently running background operations, their
+  current phase, start time, safe context, and elapsed duration.
+- Optional live updates refresh that activity once per second only while the
+  Diagnostics page is visible and the toggle is enabled.
+- Added a bounded, credential-sanitised in-memory application log view and a
+  button to truncate that view without deleting Supervisor logs, events, or
+  cached media.
+- Historical video tracking distinguishes worker wait, source probing, MP4
+  generation, and validation so a stalled operation can be located precisely.
+
 ## 0.1.9 - 2026-08-24
 
 - Pending historical thumbnails are recovered after restart and processed

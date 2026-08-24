@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from PIL import Image, ImageStat
@@ -13,8 +14,9 @@ class MediaError(RuntimeError): pass
 
 
 class MediaManager:
-    def __init__(self, settings, database):
+    def __init__(self, settings, database, tracker=None):
         self.settings, self.db = settings, database
+        self.tracker = tracker
         self.root = settings.data_dir / "cache"
         self.thumbs, self.videos, self.tmp = self.root / "thumbs", self.root / "videos", settings.data_dir / "tmp"
         for p in (self.thumbs, self.videos, self.tmp): p.mkdir(parents=True, exist_ok=True)
@@ -24,19 +26,32 @@ class MediaManager:
         self.jobs: dict[str, asyncio.Task] = {}
         for abandoned in self.tmp.glob("*.tmp"): abandoned.unlink(missing_ok=True)
 
+    @asynccontextmanager
+    async def _activity(self, operation: str, details: dict | None = None):
+        if self.tracker:
+            async with self.tracker.track(operation, details) as task_id:
+                yield task_id
+        else:
+            yield None
+
     async def _run(self, args: list[str], timeout: int | None = None) -> tuple[bytes, bytes]:
-        try:
-            process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                                                           start_new_session=True)
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout or self.settings.ffmpeg_timeout_seconds)
-        except asyncio.TimeoutError:
-            try: os.killpg(process.pid, 15)
-            except (ProcessLookupError, AttributeError): process.terminate()
-            await process.wait()
-            raise MediaError("Media operation timed out") from None
-        if process.returncode:
-            raise MediaError(redact(stderr.decode(errors="replace")[-1500:], (self.settings.nvr_username, self.settings.nvr_password)))
-        return stdout, stderr
+        operation_timeout = timeout or self.settings.ffmpeg_timeout_seconds
+        async with self._activity("media_process", {"executable": Path(args[0]).name,
+                                                     "timeout_seconds": operation_timeout}) as task_id:
+            if self.tracker and task_id:
+                self.tracker.update(task_id, phase="running")
+            try:
+                process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                                               start_new_session=True)
+                stdout, stderr = await asyncio.wait_for(process.communicate(), operation_timeout)
+            except asyncio.TimeoutError:
+                try: os.killpg(process.pid, 15)
+                except (ProcessLookupError, AttributeError): process.terminate()
+                await process.wait()
+                raise MediaError("Media operation timed out") from None
+            if process.returncode:
+                raise MediaError(redact(stderr.decode(errors="replace")[-1500:], (self.settings.nvr_username, self.settings.nvr_password)))
+            return stdout, stderr
 
     async def probe(self, url: str) -> dict:
         out, _ = await self._run(["ffprobe", "-v", "error", "-rtsp_transport", self.settings.rtsp_transport,
@@ -47,42 +62,58 @@ class MediaManager:
 
     async def thumbnail(self, event_id: str, url: str, *, diagnostic: bool = False) -> str:
         name = safe_name(event_id) + ".jpg"; final = self.thumbs / name; temp = self.tmp / (name + ".tmp")
-        try:
-            semaphore = self.diagnostic_thumbnail_semaphore if diagnostic else self.thumbnail_semaphore
-            async with semaphore:
-                for offset in (2, 4):
-                    await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                                     "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
-                                     "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)],
-                                    min(30, self.settings.ffmpeg_timeout_seconds))
-                    with Image.open(temp) as image:
-                        image.load()
-                        variation = ImageStat.Stat(image.convert("L")).stddev[0]
-                        valid = image.width > 0 and image.height > 0 and temp.stat().st_size <= 10_000_000
-                    if valid and variation >= 3:
-                        temp.replace(final)
-                        return name
-            raise MediaError("NVR returned only blank or uniform thumbnail frames")
-        finally: temp.unlink(missing_ok=True)
+        operation = "diagnostic_thumbnail" if diagnostic else "background_thumbnail"
+        async with self._activity(operation, {"event_id": event_id}) as task_id:
+            try:
+                semaphore = self.diagnostic_thumbnail_semaphore if diagnostic else self.thumbnail_semaphore
+                if self.tracker and task_id:
+                    self.tracker.update(task_id, phase="waiting_for_worker")
+                async with semaphore:
+                    if self.tracker and task_id:
+                        self.tracker.update(task_id, phase="extracting_frame")
+                    for offset in (2, 4):
+                        await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
+                                         "-i", url, "-an", "-ss", str(offset), "-frames:v", "1",
+                                         "-vf", "scale='min(960,iw)':-2", "-f", "image2", "-y", str(temp)],
+                                        min(30, self.settings.ffmpeg_timeout_seconds))
+                        with Image.open(temp) as image:
+                            image.load()
+                            variation = ImageStat.Stat(image.convert("L")).stddev[0]
+                            valid = image.width > 0 and image.height > 0 and temp.stat().st_size <= 10_000_000
+                        if valid and variation >= 3:
+                            temp.replace(final)
+                            return name
+                raise MediaError("NVR returned only blank or uniform thumbnail frames")
+            finally: temp.unlink(missing_ok=True)
 
     async def clip(self, event_id: str, url: str, duration_seconds: float, *, raise_errors: bool = False) -> None:
         name = safe_name(event_id) + ".mp4"; final = self.videos / name; temp = self.tmp / (name + ".tmp")
         bounded_duration = max(1, min(float(duration_seconds), self.settings.max_clip_seconds))
         self.db.update(event_id, video_status="generating", last_error=None)
         try:
-            async with self.clip_semaphore:
-                source = await self.probe(url)
-                video_codec = next((stream.get("codec_name") for stream in source["streams"]
-                                    if stream.get("codec_type") == "video"), None)
-                video_args = ["-c:v", "copy"] if video_codec == "h264" else [
-                    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-                ]
-                await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
-                                 "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
-                                 "-map", "0:v:0", "-map", "0:a?", *video_args, "-c:a", "aac",
-                                 "-movflags", "+faststart", "-f", "mp4", "-y", str(temp)])
-                out, _ = await self._run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type",
-                                          "-of", "json", str(temp)], 20)
+            async with self._activity("historical_video", {"event_id": event_id,
+                                                            "requested_duration_seconds": bounded_duration}) as task_id:
+                if self.tracker and task_id:
+                    self.tracker.update(task_id, phase="waiting_for_worker")
+                async with self.clip_semaphore:
+                    if self.tracker and task_id:
+                        self.tracker.update(task_id, phase="probing_source")
+                    source = await self.probe(url)
+                    video_codec = next((stream.get("codec_name") for stream in source["streams"]
+                                        if stream.get("codec_type") == "video"), None)
+                    if self.tracker and task_id:
+                        self.tracker.update(task_id, phase="generating_mp4", details={"source_codec": video_codec})
+                    video_args = ["-c:v", "copy"] if video_codec == "h264" else [
+                        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    ]
+                    await self._run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-rtsp_transport", self.settings.rtsp_transport,
+                                     "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", f"{bounded_duration:.3f}",
+                                     "-map", "0:v:0", "-map", "0:a?", *video_args, "-c:a", "aac",
+                                     "-movflags", "+faststart", "-f", "mp4", "-y", str(temp)])
+                    if self.tracker and task_id:
+                        self.tracker.update(task_id, phase="validating_mp4")
+                    out, _ = await self._run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type",
+                                              "-of", "json", str(temp)], 20)
             info = json.loads(out); duration = float(info.get("format", {}).get("duration", 0))
             if duration <= 0 or temp.stat().st_size <= 0: raise MediaError("Generated clip did not validate")
             temp.replace(final)

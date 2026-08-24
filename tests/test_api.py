@@ -34,6 +34,18 @@ def test_ingress_relative_assets():
     with TestClient(app) as client:
         html = client.get("/diagnostics").text
         assert 'href="static/app.css"' in html and 'src="static/app.js"' in html
+        assert 'id="live-updates"' in html and 'id="truncate-logs"' in html
+
+
+def test_runtime_diagnostics_and_log_truncation_are_secret_free():
+    with TestClient(app) as client:
+        runtime = client.get("/api/diagnostics/runtime")
+        assert runtime.status_code == 200
+        assert set(runtime.json()) == {"generated_at", "tasks", "logs"}
+        assert "fixture-password" not in runtime.text and "fixture-user" not in runtime.text
+        truncated = client.delete("/api/diagnostics/runtime/logs")
+        assert truncated.status_code == 200
+        assert truncated.json() == {"ok": True, "scope": "sanitised_in_memory_log_view"}
 
 
 def test_timeline_date_uses_london_local_day():

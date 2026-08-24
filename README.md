@@ -45,7 +45,7 @@ On the NVR, verify NTP, timezone, recording schedule, playback permissions, and 
 5. Enable **Show in sidebar**, start the add-on, and open its Web UI.
 6. Open **Settings** in the add-on, map each enabled channel, and save.
 
-The add-on intentionally starts with empty credentials and all channels disabled so diagnostics remain available during first-run setup.
+The add-on intentionally starts with empty credentials so diagnostics remain available during first-run setup. All eight channel slots are enabled by default and can be disabled in the channel editor.
 
 ## Local build and validation
 
@@ -99,6 +99,8 @@ For a live event, an HA camera-proxy image appears quickly and is labelled `ha_l
 ## Diagnostics and test calls
 
 Open **Diagnostics / Test** in the add-on. Results show pass/fail, duration where applicable, sanitised details, and never tokens or credential-bearing URLs.
+
+The **Background activity** panel lists currently running work with its start time, current phase, and elapsed seconds. **Live updates** refreshes the panel once per second while Diagnostics remains open; turn it off to stop polling and hide the panel. The expandable application log view stores only the latest 200 sanitised in-memory entries. **Truncate log view** clears that diagnostic buffer only—it does not alter Home Assistant Supervisor logs, event history, thumbnails, or videos.
 
 1. **Application health** checks SQLite/data writes and locates FFmpeg/FFprobe.
 2. **Home Assistant API** verifies authenticated server-side access and returns HA version/timezone.

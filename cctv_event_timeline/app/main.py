@@ -15,20 +15,31 @@ from .config import Settings
 from .database import Database
 from .hikvision import TimestampMode, playback_url, stream_url
 from .homeassistant import HomeAssistantClient
+from .log_buffer import SanitizedLogBuffer
 from .media import MediaManager
 from .models import ChannelList, HistoryTest, PlaybackTest
 from .security import redact, safe_name
+from .task_tracker import TaskTracker
 
 settings = Settings.load()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 db = Database(settings.data_dir / "events.db")
 ha = HomeAssistantClient()
-media = MediaManager(settings, db)
+task_tracker = TaskTracker()
+media = MediaManager(settings, db, task_tracker)
 log = logging.getLogger("timeline")
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
+runtime_logs = SanitizedLogBuffer((settings.nvr_username, settings.nvr_password))
 stop_event = asyncio.Event()
 reconcile_lock = asyncio.Lock()
 thumbnail_recovery_lock = asyncio.Lock()
+
+
+def install_runtime_log_handler():
+    for logger_name in ("", "uvicorn.error", "uvicorn.access"):
+        target = logging.getLogger(logger_name)
+        if runtime_logs not in target.handlers:
+            target.addHandler(runtime_logs)
 
 
 def channel(channel_id: int):
@@ -107,38 +118,52 @@ async def final_thumbnail(event_id: str, delay: int = 8):
 async def recover_pending_thumbnails():
     if thumbnail_recovery_lock.locked():
         return
-    async with thumbnail_recovery_lock:
-        for row in db.pending_thumbnails():
-            if stop_event.is_set():
-                return
-            await final_thumbnail(row["id"], delay=0)
+    pending = db.pending_thumbnails()
+    async with task_tracker.track("thumbnail_recovery", {"pending_count": len(pending)}) as task_id:
+        task_tracker.update(task_id, phase="waiting_for_worker")
+        async with thumbnail_recovery_lock:
+            for row in pending:
+                if stop_event.is_set():
+                    return
+                task_tracker.update(task_id, phase="processing", details={"event_id": row["id"]})
+                await final_thumbnail(row["id"], delay=0)
 
 
 async def reconcile():
-    async with reconcile_lock:
-        for c in settings.channels():
-            if not c.enabled or not c.motion_entity: continue
-            try:
-                states = await ha.history(c.motion_entity, settings.history_backfill_hours)
-                states = sorted(states, key=lambda state: state.get("last_changed") or state.get("last_updated") or "")
-                previous = None
-                for state in states:
-                    value = state.get("state")
-                    if value in {"on", "off"}:
-                        db.transition(c.id, c.motion_entity, previous, value,
-                                      state.get("last_changed") or state.get("last_updated"), {},
-                                      settings.pre_roll_seconds, settings.post_roll_seconds, settings.timestamp_mode,
-                                      c.timestamp_offset_minutes or settings.manual_offset_minutes,
-                                      settings.merge_gap_seconds)
-                        previous = value
-            except Exception as exc: log.warning("History reconciliation failed for channel %s: %s", c.id, redact(exc))
-        asyncio.create_task(recover_pending_thumbnails())
+    async with task_tracker.track("history_reconciliation") as task_id:
+        task_tracker.update(task_id, phase="waiting_for_lock")
+        async with reconcile_lock:
+            for c in settings.channels():
+                if not c.enabled or not c.motion_entity: continue
+                task_tracker.update(task_id, phase="reading_history", details={"channel_id": c.id})
+                try:
+                    states = await ha.history(c.motion_entity, settings.history_backfill_hours)
+                    states = sorted(states, key=lambda state: state.get("last_changed") or state.get("last_updated") or "")
+                    previous = None
+                    for state in states:
+                        value = state.get("state")
+                        if value in {"on", "off"}:
+                            db.transition(c.id, c.motion_entity, previous, value,
+                                          state.get("last_changed") or state.get("last_updated"), {},
+                                          settings.pre_roll_seconds, settings.post_roll_seconds, settings.timestamp_mode,
+                                          c.timestamp_offset_minutes or settings.manual_offset_minutes,
+                                          settings.merge_gap_seconds)
+                            previous = value
+                except Exception as exc: log.warning("History reconciliation failed for channel %s: %s", c.id, redact(exc))
+            asyncio.create_task(recover_pending_thumbnails())
+
+
+async def home_assistant_subscription():
+    async with task_tracker.track("home_assistant_subscription") as task_id:
+        task_tracker.update(task_id, phase="connected_or_reconnecting")
+        await ha.subscribe(handle_state, stop_event)
 
 
 @asynccontextmanager
 async def lifespan(app):
+    install_runtime_log_handler()
     stop_event.clear(); media.cleanup()
-    tasks = [asyncio.create_task(ha.subscribe(handle_state, stop_event)), asyncio.create_task(reconcile())]
+    tasks = [asyncio.create_task(home_assistant_subscription()), asyncio.create_task(reconcile())]
     yield
     stop_event.set()
     for task in tasks: task.cancel()
@@ -146,7 +171,7 @@ async def lifespan(app):
     for task in list(media.jobs.values()): task.cancel()
 
 
-app = FastAPI(title="CCTV Event Timeline", version="0.1.9", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="CCTV Event Timeline", version="0.1.10", lifespan=lifespan, docs_url=None, redoc_url=None)
 static = Path(__file__).parent / "static"
 index_html = (static / "index.html").read_text(encoding="utf-8")
 app.mount("/static", StaticFiles(directory=static), name="static")
@@ -449,7 +474,21 @@ async def diag_media(name: str):
     return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-store", "Accept-Ranges": "bytes"})
 
 
+@app.get("/api/diagnostics/runtime")
+async def diagnostic_runtime():
+    return {"generated_at": datetime.now(timezone.utc), "tasks": task_tracker.snapshot(),
+            "logs": runtime_logs.snapshot()}
+
+
+@app.delete("/api/diagnostics/runtime/logs")
+async def truncate_runtime_logs():
+    runtime_logs.truncate()
+    return {"ok": True, "scope": "sanitised_in_memory_log_view"}
+
+
 @app.get("/api/diagnostics/report")
-async def report(): return {"version": "0.1.9", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
+async def report(): return {"version": "0.1.10", "generated_at": datetime.now(timezone.utc), "configuration": settings.safe_summary(),
                             "channels": [{**c.model_dump(), "motion_entity": c.motion_entity, "camera_entity": c.camera_entity} for c in settings.channels()],
-                            "health": media.health(), "home_assistant_last_connected": ha.last_connected, "test_results": db.diagnostics()}
+                            "health": media.health(), "home_assistant_last_connected": ha.last_connected,
+                            "runtime": {"tasks": task_tracker.snapshot(), "logs": runtime_logs.snapshot()},
+                            "test_results": db.diagnostics()}
