@@ -18,7 +18,7 @@ from .hikvision import TimestampMode, playback_url, stream_url
 from .homeassistant import HomeAssistantClient
 from .log_buffer import SanitizedLogBuffer
 from .media import MediaManager
-from .models import ChannelList, HistoryTest, PlaybackTest, VlcCredentials
+from .models import ChannelList, ClipGenerationRequest, HistoryTest, PlaybackTest, VlcCredentials
 from .security import redact, safe_name
 from .storage import cpu_report, storage_report
 from .task_tracker import TaskTracker
@@ -59,7 +59,7 @@ def public_event(row: dict):
         row = db.event(row["id"]) or row
     keep = ("id", "channel_id", "started_at", "ended_at", "status", "thumbnail_status", "thumbnail_source",
             "video_status", "video_size", "video_duration", "video_codec", "video_error", "last_error", "retry_count",
-            "source_codec", "source_codec_label")
+            "source_codec", "source_codec_label", "pre_roll", "post_roll")
     result = {k: row.get(k) for k in keep}
     try:
         result["generation_details"] = json.loads(row["generation_json"]) if row.get("generation_json") else None
@@ -80,7 +80,7 @@ def public_event(row: dict):
     return result
 
 
-def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None, pre_roll=None,
+def event_playback(row: dict, stream="main", mode=None, offset=None, duration=None, pre_roll=None, post_roll=None,
                    credentials: tuple[str, str] | None = None):
     c = channel(row["channel_id"])
     if not c: raise ValueError("Channel mapping no longer exists")
@@ -98,7 +98,8 @@ def event_playback(row: dict, stream="main", mode=None, offset=None, duration=No
                         start=row["started_at"], end=end, mode=TimestampMode(mode or row["timestamp_mode"]),
                         nvr_timezone=settings.nvr_timezone, offset_minutes=offset if offset is not None else row["applied_offset"],
                         pre_roll=row["pre_roll"] if pre_roll is None else pre_roll,
-                        post_roll=row["post_roll"], max_seconds=settings.max_clip_seconds,
+                        post_roll=row["post_roll"] if post_roll is None else post_roll,
+                        max_seconds=settings.max_clip_seconds,
                         path_template=settings.playback_rtsp_path_template, channel=c.nvr_channel, stream=stream)
 
 
@@ -356,12 +357,14 @@ async def thumbnail(event_id: str):
 
 
 @app.post("/api/events/{event_id}/generate")
-async def generate(event_id: str):
+async def generate(event_id: str, body: ClipGenerationRequest | None = None):
     row = db.event(event_id)
     if not row: raise HTTPException(404, "Event not found")
     if not settings.nvr_username or not settings.nvr_password: raise HTTPException(409, "NVR credentials are not configured")
+    selected_pre_roll = body.pre_roll_seconds if body and body.pre_roll_seconds is not None else row["pre_roll"]
+    selected_post_roll = body.post_roll_seconds if body and body.post_roll_seconds is not None else row["post_roll"]
     try:
-        request = event_playback(row)
+        request = event_playback(row, pre_roll=selected_pre_roll, post_roll=selected_post_roll)
     except ValueError as exc:
         raise HTTPException(422, redact(exc, (settings.nvr_username, settings.nvr_password))) from None
     duration = (request.end_utc - request.start_utc).total_seconds()
@@ -370,15 +373,24 @@ async def generate(event_id: str):
         "event_id": event_id, "channel_id": row["channel_id"], "camera_name": c.name if c else None,
         "track": c.main_track if c else None, "playback_start": request.playback_start,
         "playback_end": request.playback_end, "redacted_playback_url": request.redacted_url,
-        "pre_roll_seconds": row["pre_roll"], "post_roll_seconds": row["post_roll"],
+        "pre_roll_seconds": selected_pre_roll, "post_roll_seconds": selected_post_roll,
         "rtsp_transport": settings.rtsp_transport,
     }
     media.enqueue(event_id, request.url, duration, channel_id=row["channel_id"],
                   track=c.main_track if c else None, request_details=details)
-    log.info("Historical clip requested event=%s channel=%s duration=%.3fs",
-             event_id, row["channel_id"], duration)
+    log.info("Historical clip requested event=%s channel=%s duration=%.3fs pre_roll=%ss post_roll=%ss",
+             event_id, row["channel_id"], duration, selected_pre_roll, selected_post_roll)
     return {"status": db.event(event_id)["video_status"] if event_id not in media.jobs else "generating",
-            "stream_url": f"api/events/{event_id}/stream"}
+            "stream_url": f"api/events/{event_id}/stream", "pre_roll_seconds": selected_pre_roll,
+            "post_roll_seconds": selected_post_roll, "bounded_duration_seconds": duration}
+
+
+@app.post("/api/events/{event_id}/cancel")
+async def cancel_generation(event_id: str):
+    if not db.event(event_id):
+        raise HTTPException(404, "Event not found")
+    cancelled = await media.cancel_clip(event_id, "Playback closed because no viewer remains")
+    return {"cancelled": cancelled, "video_status": db.event(event_id)["video_status"]}
 
 
 @app.get("/api/events/{event_id}/stream")
@@ -402,6 +414,7 @@ async def progressive_video(event_id: str):
 async def delete_video(event_id: str):
     row = db.event(event_id)
     if not row: raise HTTPException(404, "Event not found")
+    await media.cancel_clip(event_id, "Cached clip deleted by user")
     media.delete_clip(row); return {"ok": True}
 
 

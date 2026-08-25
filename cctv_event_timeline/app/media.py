@@ -37,6 +37,8 @@ class MediaManager:
         self.thumbnail_semaphore = asyncio.Semaphore(1)
         self.diagnostic_thumbnail_semaphore = asyncio.Semaphore(1)
         self.jobs: dict[str, asyncio.Task] = {}
+        self.progressive_viewers: dict[str, int] = {}
+        self._clip_cancel_reasons: dict[str, str] = {}
         self._codec_locks: dict[int, asyncio.Lock] = {}
         self.background_thumbnails_allowed = asyncio.Event()
         self.background_thumbnails_allowed.set()
@@ -373,6 +375,8 @@ class MediaManager:
                     out, _ = await self._run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type",
                                               "-of", "json", str(temp)], 20)
             info = json.loads(out); duration = float(info.get("format", {}).get("duration", 0))
+            if event_id in self._clip_cancel_reasons:
+                raise asyncio.CancelledError
             if duration <= 0 or temp.stat().st_size <= 0: raise MediaError("Generated clip did not validate")
             temp.replace(final)
             codec = next((s.get("codec_name") for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
@@ -384,10 +388,16 @@ class MediaManager:
             self.log.info("Historical clip ready event=%s duration=%.3fs bytes=%s codec=%s",
                           event_id, duration, final.stat().st_size, codec)
         except asyncio.CancelledError:
-            detail = "Clip generation was cancelled before completion; retry the clip"
+            intentional = self._clip_cancel_reasons.get(event_id)
+            detail = intentional or "Clip generation was cancelled before completion; retry the clip"
             self._generation_update(event_id, details, phase="cancelled", failed_at=self._utc_now(), error=detail)
-            self.db.update(event_id, video_status="failed", video_error=detail, last_error=detail)
-            self.log.warning("Historical clip cancelled event=%s phase=%s", event_id, details.get("phase"))
+            if intentional:
+                self.db.update(event_id, video_status="uncached", video_name=None, video_size=None,
+                               video_duration=None, video_codec=None, video_error=None, last_error=None)
+                self.log.info("Historical clip stopped event=%s reason=%s", event_id, detail)
+            else:
+                self.db.update(event_id, video_status="failed", video_error=detail, last_error=detail)
+                self.log.warning("Historical clip cancelled event=%s phase=%s", event_id, details.get("phase"))
             raise
         except Exception as exc:
             detail = redact(exc, (self.settings.nvr_username, self.settings.nvr_password))
@@ -398,7 +408,7 @@ class MediaManager:
             if raise_errors:
                 raise MediaError(detail) from None
         finally:
-            temp.unlink(missing_ok=True); self.jobs.pop(event_id, None)
+            temp.unlink(missing_ok=True); self.jobs.pop(event_id, None); self._clip_cancel_reasons.pop(event_id, None)
             self._sync_background_thumbnail_gate()
 
     def enqueue(self, event_id: str, url: str, duration_seconds: float, *, channel_id: int | None = None,
@@ -423,12 +433,27 @@ class MediaManager:
 
             task.add_done_callback(completed)
 
+    async def cancel_clip(self, event_id: str, reason: str) -> bool:
+        task = self.jobs.get(event_id)
+        row = self.db.event(event_id)
+        if not task or task.done() or not row or row.get("video_status") != "generating":
+            return False
+        self._clip_cancel_reasons.setdefault(event_id, reason)
+        self.db.update(event_id, video_status="uncached", video_name=None, video_size=None,
+                       video_duration=None, video_codec=None, video_error=None, last_error=None)
+        self.log.info("Stopping historical clip event=%s reason=%s", event_id, reason)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
     async def progressive_clip(self, event_id: str):
         """Yield a growing fragmented MP4 while its independent cache job runs."""
         name = safe_name(event_id) + ".mp4"
         final, temp = self.videos / name, self.tmp / (name + ".tmp")
         offset = 0
-        self.log.info("Progressive clip client connected event=%s", event_id)
+        self.progressive_viewers[event_id] = self.progressive_viewers.get(event_id, 0) + 1
+        self.log.info("Progressive clip client connected event=%s viewers=%s",
+                      event_id, self.progressive_viewers[event_id])
         try:
             while True:
                 path = final if final.is_file() else temp
@@ -451,7 +476,15 @@ class MediaManager:
             self.log.info("Progressive clip client disconnected event=%s bytes_sent=%s", event_id, offset)
             raise
         finally:
-            self.log.info("Progressive clip ended event=%s bytes_sent=%s", event_id, offset)
+            remaining = max(0, self.progressive_viewers.get(event_id, 1) - 1)
+            if remaining:
+                self.progressive_viewers[event_id] = remaining
+            else:
+                self.progressive_viewers.pop(event_id, None)
+            self.log.info("Progressive clip ended event=%s bytes_sent=%s viewers=%s", event_id, offset, remaining)
+            row = self.db.event(event_id)
+            if remaining == 0 and row and row.get("video_status") == "generating":
+                await self.cancel_clip(event_id, "Last progressive playback viewer disconnected")
 
     def delete_clip(self, event: dict):
         if event.get("video_name"): (self.videos / safe_name(Path(event["video_name"]).stem)).with_suffix(".mp4").unlink(missing_ok=True)
@@ -474,4 +507,5 @@ class MediaManager:
                 "active_jobs": len(self.jobs), "diagnostic_thumbnail_busy": self.diagnostic_thumbnail_semaphore.locked(),
                 "background_thumbnail_busy": self.thumbnail_semaphore.locked(),
                 "background_thumbnail_paused": not self.background_thumbnails_allowed.is_set(),
-                "background_thumbnail_user_paused": self._background_thumbnail_user_paused}
+                "background_thumbnail_user_paused": self._background_thumbnail_user_paused,
+                "progressive_viewers": sum(self.progressive_viewers.values())}

@@ -74,3 +74,8 @@ class VlcCredentials(BaseModel):
         if any(ord(character) < 32 or ord(character) == 127 for character in value):
             raise ValueError("VLC credentials cannot contain control characters")
         return value
+
+
+class ClipGenerationRequest(BaseModel):
+    pre_roll_seconds: int | None = Field(default=None, ge=0, le=3600)
+    post_roll_seconds: int | None = Field(default=None, ge=0, le=3600)

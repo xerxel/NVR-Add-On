@@ -346,6 +346,36 @@ async def test_cancelled_clip_is_not_left_generating(tmp_path):
     assert "cancelled" in event["video_error"].lower()
 
 
+@pytest.mark.asyncio
+async def test_last_progressive_viewer_disconnect_stops_clip_and_releases_worker(tmp_path):
+    database = FakeDatabase()
+    manager = MediaManager(settings(tmp_path), database)
+    output_started = asyncio.Event()
+
+    async def fake_run(args, timeout=None):
+        return json.dumps({"format": {}, "streams": [
+            {"codec_type": "video", "codec_name": "h264"},
+        ]}).encode(), b""
+
+    async def blocked_output(args, output, timeout):
+        output.write_bytes(b"fragment")
+        output_started.set()
+        await asyncio.Future()
+
+    manager._run = fake_run
+    manager._run_to_file = blocked_output
+    manager.enqueue("viewer_event", "rtsp://hidden", 30)
+    await output_started.wait()
+    stream = manager.progressive_clip("viewer_event")
+
+    assert await anext(stream) == b"fragment"
+    await stream.aclose()
+
+    assert "viewer_event" not in manager.jobs
+    assert database.events["viewer_event"]["video_status"] == "uncached"
+    assert manager.background_thumbnails_allowed.is_set()
+
+
 def test_manual_thumbnail_pause_survives_clip_gate_updates(tmp_path):
     manager = MediaManager(settings(tmp_path), FakeDatabase())
 

@@ -59,6 +59,9 @@ dialog{width:min(900px,94vw);border:1px solid var(--border);border-radius:14px;b
 dialog::backdrop{background:#000a}
 dialog video{width:100%;max-height:70vh;background:#000}
 .player-actions{display:flex;gap:8px;flex-wrap:wrap}
+.clip-window{display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:10px;margin:12px 0}
+.clip-window label{display:grid;gap:5px}
+.clip-window small{grid-column:1/-1;color:var(--muted)}
 .rtsp-address{margin-top:18px;padding-top:14px;border-top:1px solid var(--border)}
 .rtsp-address label{display:block;margin-bottom:7px;font-weight:700}
 .rtsp-address>div{display:grid;grid-template-columns:1fr auto;gap:8px}

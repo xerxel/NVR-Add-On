@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import app.main as main
 from app.main import app, db, diagnostic_request, event_playback
@@ -41,6 +41,7 @@ def test_ingress_relative_assets():
         assert 'id="addon-cpu"' in html and 'id="system-cpu"' in html
         assert 'id="vlc-settings"' in html and 'id="open-vlc"' in html and 'id="rtsp-url"' in html
         assert 'id="proxy-url"' in html and 'id="copy-proxy"' in html
+        assert 'id="clip-pre-roll"' in html and 'id="clip-post-roll"' in html
         assert 'id="pause-thumbnail-refresh"' in html
         script = client.get("/static/app.js").text
         style = client.get("/static/app.css").text
@@ -48,6 +49,7 @@ def test_ingress_relative_assets():
         assert "api/diagnostics/storage" in script and "api/diagnostics/cpu" in script
         assert "api/vlc-credentials" in script and "credential_free_rtsp_url" in script
         assert "Direct VLC handoff requested" in script and "codec-compare" in html
+        assert "cancelCurrentClip" in script and "pagehide" in script
         assert "'H.265':'h265'" in script and ".codec-pill.h265{background:#7b1f2b}" in style
         assert "grid-template-columns:repeat(auto-fill,minmax(250px,1fr))" in style
         assert "aspect-ratio:32/9" in style and "object-fit:cover" in style
@@ -150,6 +152,39 @@ def test_thumbnail_playback_can_omit_event_pre_roll():
 
     assert normal.playback_start == "20260823T095955Z"
     assert thumbnail.playback_start == "20260823T100000Z"
+
+
+def test_clip_generation_uses_per_request_roll_without_changing_event(monkeypatch):
+    started = datetime.now(timezone.utc)
+    event_id = db.transition(2, "binary_sensor.clip_roll_test", "off", "on",
+                             started.isoformat(), {}, 5, 10, "utc", 0, 5)
+    db.transition(2, "binary_sensor.clip_roll_test", "on", "off",
+                  (started + timedelta(seconds=20)).isoformat(), {}, 5, 10, "utc", 0, 5)
+    captured = {}
+
+    def fake_enqueue(identifier, url, duration, **kwargs):
+        captured.update({"event_id": identifier, "url": url, "duration": duration, **kwargs})
+
+    monkeypatch.setattr(main.media, "enqueue", fake_enqueue)
+    with TestClient(app) as client:
+        response = client.post(f"/api/events/{event_id}/generate", json={
+            "pre_roll_seconds": 12, "post_roll_seconds": 45,
+        })
+        public = client.get(f"/api/events/{event_id}").json()
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["pre_roll_seconds"] == 12 and result["post_roll_seconds"] == 45
+    assert result["bounded_duration_seconds"] == 77
+    assert f"starttime={(started - timedelta(seconds=12)).strftime('%Y%m%dT%H%M%SZ')}" in captured["url"]
+    assert f"endtime={(started + timedelta(seconds=65)).strftime('%Y%m%dT%H%M%SZ')}" in captured["url"]
+    assert public["pre_roll"] == 5 and public["post_roll"] == 10
+
+
+def test_clip_generation_rejects_negative_per_request_roll():
+    with TestClient(app) as client:
+        response = client.post("/api/events/missing/generate", json={"pre_roll_seconds": -1})
+    assert response.status_code == 422
 
 
 async def no_background_work():
