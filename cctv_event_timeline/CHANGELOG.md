@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.21 - 2026-08-25
+
+- Closing the event popup now aborts its browser media connection and cancels
+  an in-progress historical clip, immediately releasing the NVR/FFmpeg worker.
+- Progressive playback now tracks connected viewers and automatically stops
+  generation when the final viewer disconnects unexpectedly.
+- Page navigation sends a final cancellation request so abandoned browser tabs
+  do not leave historical playback running in the background.
+- User-initiated cancellation returns an event to `uncached` rather than
+  reporting a misleading generation failure.
+- Added per-clip pre-event and post-event second controls to the event popup;
+  they affect only that generation and do not modify stored or global defaults.
+- Added validation and diagnostics for the selected per-clip playback bounds.
+
 ## 0.1.20 - 2026-08-24
 
 - Fixed startup thumbnail recovery so events already marked `partial` are
